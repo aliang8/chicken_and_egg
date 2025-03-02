@@ -27,9 +27,7 @@ model:
   hidden_dim: 128
   layer_norm_epsilon: 1e-5
   max_position_embeddings: 1024
-  embd_pdrop: 0.1
-  resid_pdrop: 0.1
-  attn_pdrop: 0.1
+  dropout: 0.1
   num_layers: 4
 
   act_dim: ${env.act_dim}
