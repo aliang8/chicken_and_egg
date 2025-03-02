@@ -12,7 +12,7 @@ class TransformerBlock(nn.Module):
         self.attn = nn.MultiheadAttention(
             cfg.hidden_dim,
             cfg.n_head,
-            dropout=cfg.attn_pdrop,
+            dropout=cfg.dropout,
             batch_first=True,
         )
         self.ln_2 = nn.LayerNorm(cfg.hidden_dim, eps=cfg.layer_norm_epsilon)
@@ -20,7 +20,7 @@ class TransformerBlock(nn.Module):
             nn.Linear(cfg.hidden_dim, 4 * cfg.hidden_dim),
             nn.GELU(),
             nn.Linear(4 * cfg.hidden_dim, cfg.hidden_dim),
-            nn.Dropout(cfg.resid_pdrop),
+            nn.Dropout(cfg.dropout),
         )
 
     def forward(
@@ -49,7 +49,7 @@ class TransformerModel(nn.Module):
         self.cfg = cfg
         # Standard transformer encoder components
         self.wpe = nn.Embedding(cfg.max_position_embeddings, cfg.hidden_dim)
-        self.drop = nn.Dropout(cfg.embd_pdrop)
+        self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList(
             [TransformerBlock(cfg) for _ in range(cfg.num_layers)]
         )
@@ -86,10 +86,6 @@ class LTE(nn.Module):
         self.transformer = TransformerModel(cfg)
         self.ln = nn.LayerNorm(cfg.hidden_dim)
 
-        # Set random seed if specified
-        if seed:
-            torch.manual_seed(seed)
-
     def forward(
         self,
         actions: torch.Tensor,
@@ -101,17 +97,17 @@ class LTE(nn.Module):
         Embed the actions and rewards together as a single token and feed it in
 
         Args:
-            actions: [batch_size, seq_len, act_dim]
-            rewards: [batch_size, seq_len, 1]
-            position_ids: [batch_size, seq_len]
-            attention_mask: Optional [batch_size, seq_len]
+            actions: [B, T, A]
+            rewards: [B, T, 1]
+            position_ids: [B, T]
+            attention_mask: Optional [B, T]
         """
         # Embed inputs
-        reward_embeds = self.embed_reward(rewards)
-        action_embeds = self.embed_action(actions)
+        rew_embeds = self.embed_reward(rewards)
+        act_embeds = self.embed_action(actions)
 
         # Combine embeddings
-        embeddings = reward_embeds + action_embeds
+        embeddings = rew_embeds + act_embeds
         embeddings = self.ln(embeddings)
 
         # Pass through transformer
