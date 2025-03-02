@@ -1,84 +1,18 @@
-import random
-
 import einops
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import tqdm
 import wandb
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from torch.distributions import Categorical
 
-# Import environment and model after setting path
-from chicken_and_egg.envs.bandit import Bandit, MeanBandit
-from chicken_and_egg.models.lte import LTE
+from chicken_and_egg.trainers.base_trainer import BaseTrainer
 from chicken_and_egg.utils.logger import log
 
 
-class FETETrainer:
+class FETETrainer(BaseTrainer):
     def __init__(self, cfg: DictConfig):
-        self.cfg = cfg
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        log(f"Device: {self.device}")
-
-        # Set random seeds
-        torch.manual_seed(self.cfg.seed)
-        np.random.seed(self.cfg.seed)
-        random.seed(self.cfg.seed)
-
-        # Initialize environment
-        self.env = self._setup_environment()
-        log(f"Environment: {self.env}")
-
-        # Initialize model and optimizer
-        self.model = LTE(self.cfg.model).to(self.device)
-        log(f"Model: {self.model}")
-
-        self.num_training_steps = 1000 * self.cfg.env.train_len
-
-        self.optimizer = optim.AdamW(
-            self.model.parameters(),
-            lr=cfg.model.lr,
-            weight_decay=cfg.model.weight_decay,
-        )
-        self.scheduler = self._setup_scheduler()
-
-        # Calculate maximum reward for environment
-        self.max_reward = self._calculate_max_reward()
-        log(f"Max reward: {self.max_reward}")
-
-        # Setup wandb
-        self.run_name = (
-            f"n{self.cfg.env.act_dim}_p{self.cfg.env.seq_len}_b{self.cfg.data.batch_size}_"
-            f"{self.cfg.env.bandit_type}_seed{self.cfg.seed}"
-        )
-        log(f"Run name: {self.run_name}")
-
-        if self.cfg.train.wandb:
-            self._setup_wandb()
-
-    def _setup_environment(self):
-        if self.cfg.env.bandit_type == "normal":
-            return Bandit(n=self.cfg.env.act_dim, deterministic=False, noise_scale=0.5)
-        elif self.cfg.env.bandit_type == "mean":
-            return MeanBandit(n=self.cfg.env.act_dim, minval=0.5)
-        elif self.cfg.env.bandit_type == "control":
-            return MeanBandit(n=self.cfg.env.act_dim, minval=0)
-
-    def _setup_scheduler(self):
-        warmup_steps = int(self.cfg.model.warmup_fraction * self.num_training_steps)
-        return optim.lr_scheduler.LambdaLR(
-            self.optimizer,
-            lambda step: min(
-                (step + 1) / warmup_steps,
-                max(
-                    0.0,
-                    (self.num_training_steps - step)
-                    / (self.num_training_steps - warmup_steps),
-                ),
-            ),
-        )
+        super().__init__(cfg)
 
     def _calculate_max_reward(self):
         if self.cfg.env.bandit_type == "normal":
@@ -92,13 +26,6 @@ class FETETrainer:
             vals = torch.normal(0, 1, size=(10000, self.cfg.env.act_dim))
             vals[:, 0] = 0.5 if self.cfg.env.bandit_type == "mean" else 0
             return vals.max(dim=1)[0].mean().item()
-
-    def _setup_wandb(self):
-        wandb.init(
-            project="fete",
-            name=self.run_name,
-            config=OmegaConf.to_container(self.cfg, resolve=True),
-        )
 
     def batch_step(self, states, actions):
         return [self.env.step(s, a) for s, a in zip(states, actions)]

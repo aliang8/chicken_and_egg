@@ -1,0 +1,4 @@
+act_dim: 10
+seq_len: 100
+bandit_type: mean
+train_len: 200
