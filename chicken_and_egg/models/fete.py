@@ -4,18 +4,20 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig
 
+from chicken_and_egg.models.base import BaseModel
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, cfg: DictConfig):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(cfg.hidden_dim, eps=cfg.layer_norm_epsilon)
+        self.ln_1 = nn.LayerNorm(cfg.hidden_dim)
         self.attn = nn.MultiheadAttention(
             cfg.hidden_dim,
             cfg.n_head,
             dropout=cfg.dropout,
             batch_first=True,
         )
-        self.ln_2 = nn.LayerNorm(cfg.hidden_dim, eps=cfg.layer_norm_epsilon)
+        self.ln_2 = nn.LayerNorm(cfg.hidden_dim)
         self.mlp = nn.Sequential(
             nn.Linear(cfg.hidden_dim, 4 * cfg.hidden_dim),
             nn.GELU(),
@@ -48,15 +50,15 @@ class TransformerModel(nn.Module):
         super().__init__()
         self.cfg = cfg
         # Standard transformer encoder components
-        self.wpe = nn.Embedding(cfg.max_position_embeddings, cfg.hidden_dim)
+        self.wpe = nn.Embedding(cfg.max_seq_len, cfg.hidden_dim)
         self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList(
             [TransformerBlock(cfg) for _ in range(cfg.num_layers)]
         )
-        self.ln_f = nn.LayerNorm(cfg.hidden_dim, eps=cfg.layer_norm_epsilon)
+        self.ln_f = nn.LayerNorm(cfg.hidden_dim)
 
-    def forward(self, input_embeds, position_ids, attention_mask=None):
-        position_embeds = self.wpe(position_ids)
+    def forward(self, input_embeds, timesteps, attention_mask=None):
+        position_embeds = self.wpe(timesteps)
         hidden_states = input_embeds + position_embeds
         hidden_states = self.drop(hidden_states)
 
@@ -67,22 +69,16 @@ class TransformerModel(nn.Module):
         return hidden_states
 
 
-class LTE(nn.Module):
-    def __init__(self, cfg: DictConfig, seed: int = 0):
-        super().__init__()
-        self.cfg = cfg
+class FETEPolicy(BaseModel):
+    def __init__(self, cfg: DictConfig):
+        super().__init__(cfg)
 
         # Embedding layers
         self.embed_reward = nn.Linear(1, cfg.hidden_dim)
         self.embed_action = nn.Linear(cfg.act_dim, cfg.hidden_dim)
+        self.action_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
 
-        # Prediction heads
-        self.pred_max = nn.Linear(cfg.hidden_dim, cfg.act_dim)
-        self.pred_exp = nn.Linear(cfg.hidden_dim, cfg.act_dim)
-        self.pred_nonmax = nn.Linear(cfg.hidden_dim, cfg.act_dim)
-        self.pred_nonexp = nn.Linear(cfg.hidden_dim, cfg.act_dim)
-
-        # Main transformer model
+        # GPT-style transformer model
         self.transformer = TransformerModel(cfg)
         self.ln = nn.LayerNorm(cfg.hidden_dim)
 
@@ -90,16 +86,16 @@ class LTE(nn.Module):
         self,
         actions: torch.Tensor,
         rewards: torch.Tensor,
-        position_ids: torch.Tensor,
+        timesteps: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ):
         """
-        Embed the actions and rewards together as a single token and feed it in
+        Embed the actions and rewards together as a single token and feed it into the transformer.
 
         Args:
             actions: [B, T, A]
             rewards: [B, T, 1]
-            position_ids: [B, T]
+            timesteps: [B, T]
             attention_mask: Optional [B, T]
         """
         # Embed inputs
@@ -113,8 +109,63 @@ class LTE(nn.Module):
         # Pass through transformer
         output = self.transformer(
             input_embeds=embeddings,
-            position_ids=position_ids,
+            timesteps=timesteps,
             attention_mask=attention_mask,
         )
 
-        return output
+        # Predict action
+        action_logits = self.action_head(output)
+
+        return action_logits
+
+
+class FETE(BaseModel):
+    """
+    First-Explore Then Exploit policy.
+    """
+
+    def __init__(self, cfg: DictConfig):
+        super().__init__(cfg)
+
+        self.explore_policy = FETEPolicy(cfg)
+        self.exploit_policy = FETEPolicy(cfg)
+
+        # make sure the explore and exploit policies are initialized to be the same
+        self._copy_params(self.explore_policy, self.exploit_policy)
+
+        self.successor_explore_policy = FETEPolicy(cfg)
+        self.successor_exploit_policy = FETEPolicy(cfg)
+
+        self._copy_params(self.successor_explore_policy, self.successor_exploit_policy)
+
+    def update_behavior_policy(self):
+        # copy weights from successor to behavior
+        self._copy_params(self.successor_explore_policy, self.explore_policy)
+        self._copy_params(self.successor_exploit_policy, self.exploit_policy)
+
+    def _copy_params(self, src_policy, dst_policy):
+        for param, successor_param in zip(
+            src_policy.parameters(),
+            dst_policy.parameters(),
+        ):
+            param.data.copy_(successor_param.data)
+
+    def behavior(
+        self,
+        observations: torch.Tensor,
+        rewards: torch.Tensor,
+        timesteps: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ):
+        return self.explore_policy(observations, rewards, timesteps, attention_mask)
+
+    def successor(
+        self,
+        observations: torch.Tensor,
+        rewards: torch.Tensor,
+        timesteps: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ):
+        return self.successor_explore_policy(
+            observations, rewards, timesteps, attention_mask
+        )

@@ -1,9 +1,9 @@
 import pickle
+import random
 from pathlib import Path
 from typing import Dict
 
 import numpy as np
-import tensorflow as tf
 import torch
 import wandb
 from hydra.core.hydra_config import HydraConfig
@@ -56,9 +56,9 @@ class BaseTrainer:
         self.cfg.exp_dir = str(self.exp_dir)
 
         # set random seeds
+        random.seed(cfg.seed)
         np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)
-        tf.random.set_seed(cfg.seed)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         log(f"using device: {self.device}")
@@ -74,19 +74,19 @@ class BaseTrainer:
                 self.video_dir.mkdir(parents=True, exist_ok=True)
                 self.log_dir.mkdir(parents=True, exist_ok=True)
 
-                wandb_name = self.cfg.wandb_name
+                wandb_name = self.cfg.wandb.name
 
                 if self.cfg.use_wandb:
                     self.wandb_run = wandb.init(
                         # set the wandb project where this run will be logged
-                        entity=cfg.wandb_entity,
-                        project=cfg.wandb_project,
+                        entity=self.cfg.wandb.entity,
+                        project=self.cfg.wandb.project,
                         name=wandb_name,
-                        notes=self.cfg.wandb_notes,
-                        tags=self.cfg.wandb_tags,
+                        notes=self.cfg.wandb.notes,
+                        tags=self.cfg.wandb.tags,
                         # track hyperparameters and run metadata
                         config=omegaconf_to_dict(self.cfg),
-                        group=self.cfg.group_name,
+                        group=self.cfg.wandb.group_name,
                     )
                     wandb_url = self.wandb_run.get_url()
                     self.cfg.wandb_url = wandb_url  # add wandb url to config

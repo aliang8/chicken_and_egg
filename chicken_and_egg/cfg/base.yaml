@@ -6,11 +6,6 @@ defaults:
   - override hydra/launcher: local
   - _self_
 
-hydra:
-  output_subdir: null
-  run:
-    dir: .
-
 seed: 4
 datetime: ${now:%Y-%m-%d}-${now:%H-%M-%S}
 
@@ -29,6 +24,11 @@ optimizer:
     betas: [0.9, 0.999]
   num_warmup_steps: 25_000
 
+lr_scheduler:
+  name: 'ConstantLR'
+  params:
+    factor: 1
+
 # wandb configurations
 use_wandb: False
 wandb:
@@ -43,9 +43,15 @@ wandb:
 clip_grad_norm: 1.0
 
 # training
-eval_every: 500
+eval_every: 500 # in terms of epochs
+load_from_ckpt: False
+exp_dir: ""
+mode: train
+num_epochs: 100
 
 
 paths:
   # root_dir: set this in untracked local/default.yaml
   results_dir: ${paths.root_dir}/results
+
+hp_name: "" # TODO: fill this in

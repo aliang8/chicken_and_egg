@@ -32,6 +32,6 @@ wandb:
 To run the training script, use the following command:
 
 ```bash
-python main.py --config-name=config
+python main.py --config-name=train_fete
 ```
 

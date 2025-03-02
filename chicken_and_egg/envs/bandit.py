@@ -32,6 +32,14 @@ class Bandit:
             ).item()
             return {"arm_means": state["arm_means"], "reward": reward}
 
+    def _calculate_max_reward(self):
+        return (
+            torch.normal(0, 1, size=(10000, self.cfg.env.act_dim))
+            .max(dim=1)[0]
+            .mean()
+            .item()
+        )
+
 
 class MeanBandit:
     def __init__(self, n=10, deterministic=False, noise_scale=0.5, minval=0.5):
@@ -65,3 +73,8 @@ class MeanBandit:
             noise = 0 if action == 0 else self.noise_scale * torch.normal(0, 1, (1,))
             reward = (state["arm_means"][action] + noise).item()
             return {"arm_means": state["arm_means"], "reward": reward}
+
+    def _calculate_max_reward(self):
+        vals = torch.normal(0, 1, size=(10000, self.cfg.env.act_dim))
+        vals[:, 0] = 0.5
+        return vals.max(dim=1)[0].mean().item()

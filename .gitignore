@@ -9,3 +9,5 @@ __pycache__/
 .vscode/
 *.egg-info/
 chicken_and_egg/cfg/local/*
+*.txt
+chicken_and_egg/results/*

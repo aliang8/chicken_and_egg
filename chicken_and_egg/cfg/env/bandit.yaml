@@ -1,4 +1,6 @@
+env_name: bandit
+env_id: test
 act_dim: 10
-seq_len: 100
+episode_length: 100
 bandit_type: mean
-train_len: 200
+num_meta_episodes: 10
