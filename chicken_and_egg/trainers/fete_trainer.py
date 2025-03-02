@@ -1,3 +1,5 @@
+import random
+
 import einops
 import numpy as np
 import torch
@@ -23,6 +25,7 @@ class FETETrainer:
         # Set random seeds
         torch.manual_seed(self.cfg.seed)
         np.random.seed(self.cfg.seed)
+        random.seed(self.cfg.seed)
 
         # Initialize environment
         self.env = self._setup_environment()
@@ -44,6 +47,7 @@ class FETETrainer:
         # Calculate maximum reward for environment
         self.max_reward = self._calculate_max_reward()
         log(f"Max reward: {self.max_reward}")
+
         # Setup wandb
         self.run_name = (
             f"n{self.cfg.env.act_dim}_p{self.cfg.env.seq_len}_b{self.cfg.data.batch_size}_"
@@ -91,7 +95,7 @@ class FETETrainer:
 
     def _setup_wandb(self):
         wandb.init(
-            project="bandit-first-explore",
+            project="fete",
             name=self.run_name,
             config=OmegaConf.to_container(self.cfg, resolve=True),
         )
