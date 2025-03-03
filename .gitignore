@@ -11,3 +11,4 @@ __pycache__/
 chicken_and_egg/cfg/local/*
 *.txt
 chicken_and_egg/results/*
+chicken_and_egg/wandb/*

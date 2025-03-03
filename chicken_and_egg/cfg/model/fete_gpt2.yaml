@@ -1,9 +1,8 @@
 n_head: 4
 hidden_dim: 128
-max_seq_len: 1024
+max_seq_len: ${eval:${env.episode_length} * ${num_episodes}}
 dropout: 0.1
 num_layers: 4
 
 obs_dim: ${env.obs_dim}
 act_dim: ${env.act_dim}
-seq_len: ${env.seq_len}

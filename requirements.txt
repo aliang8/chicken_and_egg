@@ -13,3 +13,4 @@ tqdm>=4.65.0
 ipdb
 loguru
 einops>=0.6.0
+seaborn>=0.12.0
