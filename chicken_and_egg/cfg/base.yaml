@@ -48,7 +48,8 @@ load_from_ckpt: False
 exp_dir: ""
 mode: train
 num_epochs: 100
-
+num_train_envs: 1
+num_eval_envs: 1
 
 paths:
   # root_dir: set this in untracked local/default.yaml

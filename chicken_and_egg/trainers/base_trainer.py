@@ -10,6 +10,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 from torch.cuda.amp import GradScaler
 
+from chicken_and_egg.envs.utils import make_envs
 from chicken_and_egg.utils.general_utils import omegaconf_to_dict, prefix_dict_keys
 from chicken_and_egg.utils.logger import log
 
@@ -54,6 +55,18 @@ class BaseTrainer:
 
         # add exp_dir to config
         self.cfg.exp_dir = str(self.exp_dir)
+
+        # initialize environments for training and evaluation
+        self.train_envs = make_envs(
+            env_name=self.cfg.env.env_name,
+            num_envs=self.cfg.num_train_envs,
+            seed=self.cfg.seed,
+        )
+        self.eval_envs = make_envs(
+            env_name=self.cfg.env.env_name,
+            num_envs=self.cfg.num_eval_envs,
+            seed=self.cfg.seed + 10000,
+        )
 
         # set random seeds
         random.seed(cfg.seed)
@@ -106,6 +119,8 @@ class BaseTrainer:
 
         # initialize optimizer
         self.optimizer, self.scheduler = self.setup_optimizer_and_scheduler()
+
+        # initialize environment
 
         # count number of parameters
         num_params = sum(p.numel() for p in self.model.parameters())

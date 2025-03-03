@@ -1,5 +1,7 @@
 import time
+from typing import List
 
+import einops
 import torch
 import torch.nn.functional as F
 import tqdm
@@ -8,6 +10,7 @@ from omegaconf import DictConfig
 
 from chicken_and_egg.models.fete import FETE
 from chicken_and_egg.trainers.base_trainer import BaseTrainer
+from chicken_and_egg.utils.general_utils import to_numpy
 from chicken_and_egg.utils.logger import log
 
 
@@ -20,10 +23,17 @@ class FETETrainer(BaseTrainer):
         model = FETE(self.cfg.model)
         return model
 
-    def rollout_explore(self):
+    def rollout_meta_episode(
+        self,
+        policy_type: str,
+        context_policy: List[torch.Tensor] = None,
+        context_successor: List[torch.Tensor] = None,
+    ):
         """
         Rollout the exploration behavior and successor policies.
         Returns the context for the exploitation policy.
+
+        NOTE: the exploration policy provides the context for both policies
 
         Returns:
             episode_return: float
@@ -31,44 +41,57 @@ class FETETrainer(BaseTrainer):
             context_policy: [observations, rewards, actions]
             context_successor: [observations, rewards, actions]
         """
-        import ipdb
-
-        ipdb.set_trace()
         temp_loss, episode_return = 0, 0
-        # keep track of context here for observation, reward and action
-        T = self.cfg.env.episode_length * self.cfg.env.num_meta_episodes
-        O = self.cfg.env.obs_dim
-        A = self.cfg.env.act_dim
 
-        # create context for the behavior explore/exploit policy
-        observations_context = torch.zeros(T, O)
-        rewards_context = torch.zeros(T)
-        actions_context = torch.zeros(T, A)
-        timesteps = torch.arange(T)
-        mask = torch.zeros(T)
-        mask[-1] = 1
+        if policy_type == "explore":
+            # keep track of context here for observation, reward and action
+            T = self.cfg.env.episode_length * self.cfg.env.num_meta_episodes
+            O = self.cfg.env.obs_dim
+            A = self.cfg.env.act_dim
 
-        # create context for the successor explore/exploit policy
-        observations_successor = torch.zeros(T, O)
-        rewards_successor = torch.zeros(T)
-        actions_successor = torch.zeros(T, A)
+            # create context for the behavior explore/exploit policy
+            observations_context = torch.zeros(1, T, O).to(self.device)
+            rewards_context = torch.zeros(1, T, 1).to(self.device)
+            actions_context = torch.zeros(1, T, 1).to(self.device)
+            timesteps = torch.arange(T).unsqueeze(0).to(self.device)
+            mask = torch.zeros(1, T).to(self.device)
+            mask[-1] = 1
 
-        # initialize context with random action and observation
-        obs, info = self.env.reset()
-        observations_context[-1] = obs
+            # create context for the successor explore/exploit policy
+            observations_successor = torch.zeros(1, T, O).to(self.device)
+            rewards_successor = torch.zeros(1, T, 1).to(self.device)
+            actions_successor = torch.zeros(1, T, 1).to(self.device)
+
+            # initialize context with random action and observation
+            obs, info = self.train_envs.reset()
+            obs = torch.from_numpy(obs).to(self.device)
+            observations_context[:, -1] = obs
+        else:
+            # for exploitation, use the context from the exploration policy
+            observations_context, rewards_context, actions_context = context_policy
+            observations_successor, rewards_successor, actions_successor = (
+                context_successor
+            )
 
         for ts in range(self.cfg.env.episode_length):
-            behavior_logits = self.model.behavior(
+            # [N, T, A]
+            behavior_logits = self.model(
                 observations=observations_context,
+                actions=actions_context,
                 rewards=rewards_context,
                 timesteps=timesteps,
                 attention_mask=mask,
+                policy_type=f"{policy_type}_behavior",
             )
-            successor_logits = self.model.successor(
+
+            # [N, T, A]
+            successor_logits = self.model(
                 observations=observations_successor,
+                actions=actions_successor,
                 rewards=rewards_successor,
                 timesteps=timesteps,
                 attention_mask=mask,
+                policy_type=f"{policy_type}_successor",
             )
 
             # compute hadamard product of logits
@@ -77,32 +100,43 @@ class FETETrainer(BaseTrainer):
             # sample action from logits
             action = torch.argmax(logits, dim=-1)
 
+            # compute loss for current timestep
+            logits_t = logits[:, -1]
+            action_t = action[:, -1]
+
             # cross entropy loss
-            temp_loss += F.cross_entropy(logits, action)
+            temp_loss += F.cross_entropy(logits_t, action_t)
 
-            next_state, reward, done, terminal, info = self.env.step(action)
+            next_state, reward, done, terminal, info = self.train_envs.step(
+                to_numpy(action_t)
+            )
 
-            # update context by appending new state, reward and action
-            observations_context = torch.cat(
-                [observations_context, next_state.unsqueeze(0)], dim=0
-            )[1:]
-            rewards_context = torch.cat([rewards_context, reward.unsqueeze(0)], dim=0)[
-                1:
-            ]
-            actions_context = torch.cat([actions_context, action.unsqueeze(0)], dim=0)[
-                1:
-            ]
+            # NOTE: only update context if we are exploring
+            if policy_type == "explore":
+                next_state = torch.from_numpy(next_state).to(self.device)
+                action_t = action_t.float()
+                reward = torch.from_numpy(reward).to(self.device).unsqueeze(-1).float()
 
-            # update successor context by appending new state, reward and action
-            observations_successor = torch.cat(
-                [observations_successor, next_state.unsqueeze(0)], dim=0
-            )[1:]
-            rewards_successor = torch.cat(
-                [rewards_successor, reward.unsqueeze(0)], dim=0
-            )[1:]
-            actions_successor = torch.cat(
-                [actions_successor, action.unsqueeze(0)], dim=0
-            )[1:]
+                # update context by appending new state, reward and action
+                observations_context = torch.cat(
+                    [observations_context, next_state.unsqueeze(1)], dim=1
+                )[:, 1:]
+                rewards_context = torch.cat(
+                    [rewards_context, reward.unsqueeze(1)], dim=1
+                )[:, 1:]
+                action_t = einops.repeat(action_t, "b -> b t a", t=1, a=1)
+                actions_context = torch.cat([actions_context, action_t], dim=1)[:, 1:]
+
+                # update successor context by appending new state, reward and action
+                observations_successor = torch.cat(
+                    [observations_successor, next_state.unsqueeze(1)], dim=1
+                )[:, 1:]
+                rewards_successor = torch.cat(
+                    [rewards_successor, reward.unsqueeze(1)], dim=1
+                )[:, 1:]
+                actions_successor = torch.cat([actions_successor, action_t], dim=1)[
+                    :, 1:
+                ]
 
             episode_return += reward
 
@@ -116,7 +150,10 @@ class FETETrainer(BaseTrainer):
             actions_successor,
         ]
 
-        return episode_return, temp_loss, context_policy, context_successor
+        if policy_type == "explore":
+            return episode_return, temp_loss, context_policy, context_successor
+        else:
+            return episode_return, temp_loss, None, None
 
     def train_step(self):
         self.model.train()
@@ -125,19 +162,22 @@ class FETETrainer(BaseTrainer):
         update_time = time.time()
         total_loss = 0.0
         best_r = 0.0  # TODO: set this as env parameter
-        with torch.amp.autocast("cuda"):
-            r_explore, l_explore, context_policy, context_successor = (
-                self.rollout_explore()
-            )
-            r_exploit, l_exploit, _, _ = self.rollout_exploit(
-                context_policy, context_successor
-            )
 
-            if r_exploit > best_r:
-                total_loss += l_exploit
-            if r_explore > best_r:
-                total_loss += l_explore
-                best_r = r_exploit
+        # rollout N episodes
+        for ep_idx in range(self.cfg.env.num_meta_episodes):
+            with torch.amp.autocast("cuda"):
+                r_explore, l_explore, context_policy, context_successor = (
+                    self.rollout_meta_episode("explore")
+                )
+                r_exploit, l_exploit, _, _ = self.rollout_meta_episode(
+                    "exploit", context_policy, context_successor
+                )
+
+                if r_exploit > best_r:
+                    total_loss += l_exploit
+                if r_explore > best_r:
+                    total_loss += l_explore
+                    best_r = r_exploit
 
         self.scaler.scale(total_loss).backward()
         # Unscale gradients to prepare for gradient clipping

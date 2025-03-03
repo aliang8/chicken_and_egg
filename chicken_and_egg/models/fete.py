@@ -31,7 +31,7 @@ class TransformerBlock(nn.Module):
         # Self attention
         residual = x
         x = self.ln_1(x)
-        x, _ = self.attn(x, x, x, attn_mask=attention_mask)
+        x, _ = self.attn(x, x, x, key_padding_mask=attention_mask)
         x = residual + x
 
         # MLP
@@ -75,7 +75,8 @@ class FETEPolicy(BaseModel):
 
         # Embedding layers
         self.embed_reward = nn.Linear(1, cfg.hidden_dim)
-        self.embed_action = nn.Linear(cfg.act_dim, cfg.hidden_dim)
+        self.embed_action = nn.Linear(1, cfg.hidden_dim)
+        self.embed_observation = nn.Linear(cfg.obs_dim, cfg.hidden_dim)
         self.action_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
 
         # GPT-style transformer model
@@ -84,6 +85,7 @@ class FETEPolicy(BaseModel):
 
     def forward(
         self,
+        observations: torch.Tensor,
         actions: torch.Tensor,
         rewards: torch.Tensor,
         timesteps: torch.Tensor,
@@ -93,17 +95,19 @@ class FETEPolicy(BaseModel):
         Embed the actions and rewards together as a single token and feed it into the transformer.
 
         Args:
+            observations: [B, T, O]
             actions: [B, T, A]
             rewards: [B, T, 1]
             timesteps: [B, T]
             attention_mask: Optional [B, T]
         """
         # Embed inputs
+        obs_embeds = self.embed_observation(observations)
         rew_embeds = self.embed_reward(rewards)
         act_embeds = self.embed_action(actions)
 
         # Combine embeddings
-        embeddings = rew_embeds + act_embeds
+        embeddings = rew_embeds + act_embeds + obs_embeds
         embeddings = self.ln(embeddings)
 
         # Pass through transformer
@@ -150,22 +154,22 @@ class FETE(BaseModel):
         ):
             param.data.copy_(successor_param.data)
 
-    def behavior(
+    def forward(
         self,
         observations: torch.Tensor,
+        actions: torch.Tensor,
         rewards: torch.Tensor,
         timesteps: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        policy_type: str = "explore_behavior",
     ):
-        return self.explore_policy(observations, rewards, timesteps, attention_mask)
+        if policy_type == "explore_behavior":
+            policy = self.explore_policy
+        elif policy_type == "explore_successor":
+            policy = self.successor_explore_policy
+        elif policy_type == "exploit_behavior":
+            policy = self.exploit_policy
+        elif policy_type == "exploit_successor":
+            policy = self.successor_exploit_policy
 
-    def successor(
-        self,
-        observations: torch.Tensor,
-        rewards: torch.Tensor,
-        timesteps: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ):
-        return self.successor_explore_policy(
-            observations, rewards, timesteps, attention_mask
-        )
+        return policy(observations, actions, rewards, timesteps, attention_mask)
