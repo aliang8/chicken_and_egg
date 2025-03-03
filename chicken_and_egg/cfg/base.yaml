@@ -1,0 +1,60 @@
+defaults:
+  - env: bandit
+  - model: fete_gpt2
+  - local: default 
+  - hydra: default 
+  - override hydra/launcher: local
+  - _self_
+
+seed: 4
+datetime: ${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+data:
+  batch_size: 128
+
+debug: False
+
+# optimizer and scheduling
+optimizer:
+  name: 'AdamW'
+  params:
+    lr: 3e-4
+    eps: 1e-5
+    weight_decay: 0.001
+    betas: [0.9, 0.999]
+  num_warmup_steps: 25_000
+
+lr_scheduler:
+  name: 'ConstantLR'
+  params:
+    factor: 1
+
+# wandb configurations
+use_wandb: False
+wandb:
+  name: ${hp_name}
+  entity: ${wandb.entity}
+  project: ${wandb.project}
+  notes: ''
+  tags: 
+    - 'clam'
+  group_name: ''
+
+clip_grad_norm: 1.0
+
+# training
+eval_every: 5 # in terms of epochs
+load_from_ckpt: False
+exp_dir: ""
+mode: train
+skip_first_eval: False
+num_epochs: 100
+num_train_envs: 1
+num_eval_envs: 1
+num_episodes: 5
+
+paths:
+  # root_dir: set this in untracked local/default.yaml
+  results_dir: ${paths.root_dir}/results
+
+hp_name: "" # TODO: fill this in

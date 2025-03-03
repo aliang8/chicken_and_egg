@@ -1,0 +1,13 @@
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.DS_Store
+.env
+.venv/
+.idea/
+.vscode/
+*.egg-info/
+chicken_and_egg/cfg/local/*
+*.txt
+chicken_and_egg/results/*

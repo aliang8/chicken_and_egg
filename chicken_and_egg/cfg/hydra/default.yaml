@@ -1,0 +1,26 @@
+job:
+  name: ${name}
+
+output_subdir: null
+run:
+  dir: ${paths.results_dir}/${name}/${datetime}/${env.env_name}-${env.env_id}/${hp_name}
+
+sweep:
+  dir: ${paths.results_dir}/${name}/${datetime}/${env.env_name}-${env.env_id}
+  subdir: ${hp_name}
+
+job_logging:
+  root:
+    handlers: [file, console]
+  handlers:
+    file:
+      class: logging.FileHandler
+      filename: ${paths.results_dir}/${name}/${datetime}/${env.env_name}-${env.env_id}/log.txt
+      mode: w
+      formatter: simple
+    console:
+      class: logging.StreamHandler
+      formatter: simple
+  formatters:
+    simple:
+      format: "[%(asctime)s] %(levelname)s - %(message)s"
