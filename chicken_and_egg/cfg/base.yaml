@@ -22,7 +22,7 @@ optimizer:
     eps: 1e-5
     weight_decay: 0.001
     betas: [0.9, 0.999]
-  num_warmup_steps: 25_000
+  num_warmup_steps: 5 # this is per epoch
 
 lr_scheduler:
   name: 'ConstantLR'
@@ -31,15 +31,6 @@ lr_scheduler:
 
 # wandb configurations
 use_wandb: False
-wandb:
-  name: ${hp_name}
-  entity: ${wandb.entity}
-  project: ${wandb.project}
-  notes: ''
-  tags: 
-    - 'clam'
-  group_name: ''
-
 clip_grad_norm: 1.0
 
 # training

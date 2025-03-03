@@ -194,6 +194,8 @@ class FETETrainer(BaseTrainer):
 
                 best_r = r_exploit * mask + best_r * (1 - mask2.int())
 
+        # average loss over number of environments
+        total_loss = total_loss.mean()
         self.scaler.scale(total_loss).backward()
         # Unscale gradients to prepare for gradient clipping
         self.scaler.unscale_(self.optimizer)

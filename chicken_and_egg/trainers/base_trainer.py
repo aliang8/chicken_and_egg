@@ -102,7 +102,6 @@ class BaseTrainer:
                         group=self.cfg.wandb.group_name,
                     )
                     wandb_url = self.wandb_run.get_url()
-                    self.cfg.wandb_url = wandb_url  # add wandb url to config
                     log(f"wandb url: {wandb_url}")
 
                 else:

@@ -1,7 +1,9 @@
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from chicken_and_egg.trainers.fete_trainer import FETETrainer
+
+OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
 @hydra.main(version_base=None, config_path="cfg", config_name="base")
