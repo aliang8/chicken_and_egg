@@ -1,6 +1,8 @@
 import gymnasium as gym
 import torch
 
+from chicken_and_egg.utils.logger import log
+
 
 class Bandit(gym.Env):
     def __init__(self, n=10, deterministic=True, noise_scale=0.1):
@@ -10,6 +12,7 @@ class Bandit(gym.Env):
         self.deterministic = deterministic
         self.noise_scale = noise_scale
         self.current_state = None
+        log(f"Best reward: {self._calculate_max_reward()}", color="yellow")
 
     @property
     def action_space(self):
@@ -30,6 +33,7 @@ class Bandit(gym.Env):
 
     def meta_reset(self):
         arm_means = self.gen_arm_means()
+        self.current_state = arm_means
         return arm_means, {"reward": 0}
 
     def step(self, action):
@@ -48,12 +52,7 @@ class Bandit(gym.Env):
             return self.current_state, reward, False, False, {"reward": reward}
 
     def _calculate_max_reward(self):
-        return (
-            torch.normal(0, 1, size=(10000, self.cfg.env.act_dim))
-            .max(dim=1)[0]
-            .mean()
-            .item()
-        )
+        return torch.normal(0, 1, size=(10000, self.n)).max(dim=1)[0].mean().item()
 
 
 class MeanBandit(Bandit):
@@ -78,6 +77,7 @@ class MeanBandit(Bandit):
 
     def meta_reset(self):
         arm_means = self.gen_arm_means()
+        self.current_state = arm_means
         return arm_means, {"reward": 0}
 
     def step(self, action):
@@ -95,6 +95,6 @@ class MeanBandit(Bandit):
             return self.current_state, reward, False, False, {"reward": reward}
 
     def _calculate_max_reward(self):
-        vals = torch.normal(0, 1, size=(10000, self.cfg.env.act_dim))
+        vals = torch.normal(0, 1, size=(10000, self.n))
         vals[:, 0] = 0.5
         return vals.max(dim=1)[0].mean().item()

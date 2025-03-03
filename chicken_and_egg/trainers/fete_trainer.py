@@ -2,6 +2,9 @@ import time
 from typing import List
 
 import einops
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
 import torch
 import torch.nn.functional as F
 import tqdm
@@ -12,6 +15,12 @@ from chicken_and_egg.models.fete import FETE
 from chicken_and_egg.trainers.base_trainer import BaseTrainer
 from chicken_and_egg.utils.general_utils import to_numpy
 from chicken_and_egg.utils.logger import log
+
+sns.set_style("white")
+sns.set_style("ticks")
+sns.set_context("talk")
+plt.rc("text", usetex=True)  # camera-ready formatting + latex in plots
+plt.rc("font", family="serif")
 
 
 class FETETrainer(BaseTrainer):
@@ -44,53 +53,37 @@ class FETETrainer(BaseTrainer):
         """
         temp_loss, episode_return = 0, 0
 
-        T = self.cfg.env.episode_length
+        # for exploitation, use the context from the exploration policy
+        observations_context = context_policy["observations"]
+        rewards_context = context_policy["rewards"]
+        actions_context = context_policy["actions"]
+        mask = context_policy["mask"]
+        timesteps = context_policy["timesteps"]
+        observations_successor = context_successor["observations"]
+        rewards_successor = context_successor["rewards"]
+        actions_successor = context_successor["actions"]
 
-        if policy_type == "explore":
-            # keep track of context here for observation, reward and action
-            O = self.cfg.env.obs_dim
-            A = self.cfg.env.act_dim
+        # run a meta_reset here
+        temp = self.train_envs.call("meta_reset")
+        obs = [o for o, _ in temp]
+        obs = torch.stack(obs, dim=0).to(self.device).unsqueeze(1)
 
-            # create context for the behavior explore/exploit policy
-            observations_context = torch.zeros(1, T, O).to(self.device)
-            rewards_context = torch.zeros(1, T, 1).to(self.device)
-            actions_context = torch.zeros(1, T, 1).to(self.device)
-            mask = torch.zeros(1, T).to(self.device)
-            mask[-1] = 1
-
-            # create context for the successor explore/exploit policy
-            observations_successor = torch.zeros(1, T, O).to(self.device)
-            rewards_successor = torch.zeros(1, T, 1).to(self.device)
-            actions_successor = torch.zeros(1, T, 1).to(self.device)
-
-            # initialize context with random action and observation
-            obs, info = self.train_envs.reset()
-            obs = torch.from_numpy(obs).to(self.device)
-            observations_context[:, -1] = obs
-        else:
-            # for exploitation, use the context from the exploration policy
-            observations_context, rewards_context, actions_context, mask = (
-                context_policy
-            )
-            (
-                observations_successor,
-                rewards_successor,
-                actions_successor,
-                mask,
-            ) = context_successor
-
-        timesteps = torch.arange(T).unsqueeze(0).to(self.device)
+        # add the new observations to the context
+        observations_context = torch.cat([observations_context, obs], dim=1)[:, 1:]
+        observations_successor = torch.cat([observations_successor, obs], dim=1)[:, 1:]
 
         for ts in range(self.cfg.env.episode_length):
-            # [N, T, A]
-            behavior_logits = self.model(
-                observations=observations_context,
-                actions=actions_context,
-                rewards=rewards_context,
-                timesteps=timesteps,
-                attention_mask=mask,
-                policy_type=f"{policy_type}_behavior",
-            )
+            # [N, T, A], do not update the gradients for the behavior policy
+            # these will be updated by copying the weights from the successor policy
+            with torch.no_grad():
+                behavior_logits = self.model(
+                    observations=observations_context,
+                    actions=actions_context,
+                    rewards=rewards_context,
+                    timesteps=timesteps,
+                    attention_mask=mask,
+                    policy_type=f"{policy_type}_behavior",
+                )
 
             # [N, T, A]
             successor_logits = self.model(
@@ -132,8 +125,13 @@ class FETETrainer(BaseTrainer):
                 rewards_context = torch.cat(
                     [rewards_context, reward.unsqueeze(1)], dim=1
                 )[:, 1:]
-                action_t = einops.repeat(action_t, "b -> b t a", t=1, a=1)
+                action_t = einops.repeat(action_t, "b -> b t a", t=1, a=1).detach()
                 actions_context = torch.cat([actions_context, action_t], dim=1)[:, 1:]
+
+                timesteps = torch.cat(
+                    [timesteps, torch.ones_like(timesteps)[:, :1] * (ts + 1)], dim=1
+                )[:, 1:]
+                mask = torch.cat([mask, torch.ones_like(mask)[:, :1]], dim=1)[:, 1:]
 
                 # update successor context by appending new state, reward and action
                 observations_successor = torch.cat(
@@ -153,20 +151,61 @@ class FETETrainer(BaseTrainer):
             if done:
                 break
 
-        context_policy = [
-            observations_context,
-            rewards_context,
-            actions_context,
-            mask,
-        ]
-        context_successor = [
-            observations_successor,
-            rewards_successor,
-            actions_successor,
-            mask,
-        ]
+        context_policy = {
+            "observations": observations_context,
+            "rewards": rewards_context,
+            "actions": actions_context,
+            "mask": mask,
+            "timesteps": timesteps,
+        }
+
+        context_successor = {
+            "observations": observations_successor,
+            "rewards": rewards_successor,
+            "actions": actions_successor,
+        }
 
         return episode_return, temp_loss, context_policy, context_successor
+
+    def _init_context(self):
+        T = self.cfg.env.episode_length * self.cfg.num_episodes
+
+        # keep track of context here for observation, reward and action
+        O = self.cfg.env.obs_dim
+        A = self.cfg.env.act_dim
+
+        # create context for the behavior explore/exploit policy
+        observations_context = torch.zeros(1, T, O).to(self.device)
+        rewards_context = torch.zeros(1, T, 1).to(self.device)
+        actions_context = torch.zeros(1, T, 1).to(self.device)
+        mask = torch.zeros(1, T).to(self.device)
+        mask[:, -1] = 1
+        timesteps = torch.zeros(1, T).to(self.device).long()
+
+        # create context for the successor explore/exploit policy
+        observations_successor = torch.zeros(1, T, O).to(self.device)
+        rewards_successor = torch.zeros(1, T, 1).to(self.device)
+        actions_successor = torch.zeros(1, T, 1).to(self.device)
+
+        # initialize context with random action and observation
+        # obs, info = self.train_envs.reset()
+        # obs = torch.from_numpy(obs).to(self.device)
+        # observations_context[:, -1] = obs
+
+        context_policy = {
+            "observations": observations_context,
+            "rewards": rewards_context,
+            "actions": actions_context,
+            "mask": mask,
+            "timesteps": timesteps,
+        }
+        context_successor = {
+            "observations": observations_successor,
+            "rewards": rewards_successor,
+            "actions": actions_successor,
+        }
+
+        return context_policy, context_successor
 
     def train_step(self):
         self.model.train()
@@ -178,9 +217,12 @@ class FETETrainer(BaseTrainer):
 
         # rollout N episodes
         with torch.amp.autocast("cuda"):
+            context_policy, context_successor = self._init_context()
             for ep_idx in range(self.cfg.num_episodes):
                 r_explore, l_explore, context_policy, context_successor = (
-                    self.rollout_meta_episode("explore", stage="train")
+                    self.rollout_meta_episode(
+                        "explore", context_policy, context_successor, stage="train"
+                    )
                 )
                 r_exploit, l_exploit, _, _ = self.rollout_meta_episode(
                     "exploit", context_policy, context_successor, stage="train"
@@ -191,8 +233,9 @@ class FETETrainer(BaseTrainer):
 
                 mask2 = r_explore > best_r
                 total_loss += l_explore * mask2
-
                 best_r = r_exploit * mask + best_r * (1 - mask2.int())
+
+                log(f"Epoch: {self.current_epoch}, Best R: {best_r}")
 
         # average loss over number of environments
         total_loss = total_loss.mean()
@@ -221,6 +264,23 @@ class FETETrainer(BaseTrainer):
 
         return train_metrics
 
+    def _generate_plots(self, rewards):
+        # TODO: pick the first environment for plotting
+        # make a plot of rewards over time
+        ep_ret = np.cumsum(rewards[0, :, 0], axis=0)
+        plt.figure(figsize=(10, 5))
+        plt.plot(ep_ret)
+        # add vertical line at each episode end
+        for i in range(self.cfg.num_episodes):
+            plt.axvline(x=i * self.cfg.env.episode_length, color="k", linestyle="--")
+
+        plt.title("Episode Return")
+        plt.xlabel("Environment Steps")
+        plt.ylabel("Cumulative Reward")
+        plt.tight_layout()
+
+        self.log_to_wandb({"ep_ret": wandb.Image(plt)}, prefix="plots/")
+
     def eval(self):
         log(
             " ======================= Running evaluation episodes ======================= ",
@@ -231,11 +291,14 @@ class FETETrainer(BaseTrainer):
         num_explore = 1
         num_exploit = self.cfg.num_episodes - num_explore
 
+        context_policy, context_successor = self._init_context()
         with torch.no_grad():
             # we combine the exploit and explore policies for evaluation
             for _ in range(num_explore):
                 r_explore, _, context_policy, context_successor = (
-                    self.rollout_meta_episode("explore", stage="eval")
+                    self.rollout_meta_episode(
+                        "explore", context_policy, context_successor, stage="eval"
+                    )
                 )
 
             for _ in range(num_exploit):
@@ -248,6 +311,14 @@ class FETETrainer(BaseTrainer):
             ep_return = r_explore + r_exploit
             mean_ep_return = ep_return.mean().item()
             std_ep_return = ep_return.std().item()
+
+            # generate some visualizations of the return over time
+            rewards = context_policy["rewards"]
+            rewards = rewards.cpu().numpy()
+            actions = context_policy["actions"]
+            observations = context_policy["observations"]
+
+            self._generate_plots(rewards)
 
             eval_metrics = {
                 "eval/mean_ep_ret": mean_ep_return,

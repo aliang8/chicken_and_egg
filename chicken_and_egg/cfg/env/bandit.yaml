@@ -1,6 +1,6 @@
-env_name: bandit
+env_name: bandit_${env.bandit_type}
 env_id: test
 obs_dim: 10
 act_dim: 10
-episode_length: 100
+episode_length: 10
 bandit_type: mean
