@@ -51,7 +51,8 @@ class FETETrainer(BaseTrainer):
             context_policy: [observations, rewards, actions]
             context_successor: [observations, rewards, actions]
         """
-        temp_loss, episode_return = 0, 0
+        temp_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
+        episode_return = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
 
         # for exploitation, use the context from the exploration policy
         observations_context = context_policy["observations"]
@@ -106,7 +107,7 @@ class FETETrainer(BaseTrainer):
             action_t = action[:, -1]
 
             # cross entropy loss
-            temp_loss += F.cross_entropy(logits_t, action_t)
+            temp_loss += F.cross_entropy(logits_t, action_t, reduction="none")
 
             next_state, reward, done, terminal, info = self.train_envs.step(
                 to_numpy(action_t)
@@ -213,7 +214,8 @@ class FETETrainer(BaseTrainer):
 
         update_time = time.time()
         total_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
-        best_r = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
+        # best_r = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
+        best_r = torch.tensor(-float("inf")).to(self.device)
 
         # rollout N episodes
         with torch.amp.autocast("cuda"):
@@ -228,12 +230,22 @@ class FETETrainer(BaseTrainer):
                     "exploit", context_policy, context_successor, stage="train"
                 )
 
-                mask = r_exploit > best_r
+                # exploit episode is 'informative'
+                mask = r_exploit >= best_r
                 total_loss += l_exploit * mask
 
-                mask2 = r_explore > best_r
+                # explore episode is 'maximal'
+                mask2 = r_exploit > best_r
                 total_loss += l_explore * mask2
-                best_r = r_exploit * mask + best_r * (1 - mask2.int())
+                # best_r = r_exploit * mask + best_r * (1 - mask2.int())
+
+                # select the best reward from all the exploit episodes across environments
+                r_exploit_ = r_exploit[mask2]
+                # handle max of empty tensor
+                if r_exploit_.numel() > 0:
+                    best_r = r_exploit_.max()
+                else:
+                    best_r = best_r
 
                 log(f"Epoch: {self.current_epoch}, Best R: {best_r}")
 
