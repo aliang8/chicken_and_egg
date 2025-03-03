@@ -4,4 +4,3 @@ obs_dim: 10
 act_dim: 10
 episode_length: 100
 bandit_type: mean
-num_meta_episodes: 10

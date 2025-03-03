@@ -43,13 +43,15 @@ wandb:
 clip_grad_norm: 1.0
 
 # training
-eval_every: 500 # in terms of epochs
+eval_every: 5 # in terms of epochs
 load_from_ckpt: False
 exp_dir: ""
 mode: train
+skip_first_eval: False
 num_epochs: 100
 num_train_envs: 1
 num_eval_envs: 1
+num_episodes: 5
 
 paths:
   # root_dir: set this in untracked local/default.yaml

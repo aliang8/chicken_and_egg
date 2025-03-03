@@ -28,6 +28,7 @@ class FETETrainer(BaseTrainer):
         policy_type: str,
         context_policy: List[torch.Tensor] = None,
         context_successor: List[torch.Tensor] = None,
+        stage: str = "train",
     ):
         """
         Rollout the exploration behavior and successor policies.
@@ -43,9 +44,10 @@ class FETETrainer(BaseTrainer):
         """
         temp_loss, episode_return = 0, 0
 
+        T = self.cfg.env.episode_length
+
         if policy_type == "explore":
             # keep track of context here for observation, reward and action
-            T = self.cfg.env.episode_length * self.cfg.env.num_meta_episodes
             O = self.cfg.env.obs_dim
             A = self.cfg.env.act_dim
 
@@ -53,7 +55,6 @@ class FETETrainer(BaseTrainer):
             observations_context = torch.zeros(1, T, O).to(self.device)
             rewards_context = torch.zeros(1, T, 1).to(self.device)
             actions_context = torch.zeros(1, T, 1).to(self.device)
-            timesteps = torch.arange(T).unsqueeze(0).to(self.device)
             mask = torch.zeros(1, T).to(self.device)
             mask[-1] = 1
 
@@ -68,10 +69,17 @@ class FETETrainer(BaseTrainer):
             observations_context[:, -1] = obs
         else:
             # for exploitation, use the context from the exploration policy
-            observations_context, rewards_context, actions_context = context_policy
-            observations_successor, rewards_successor, actions_successor = (
-                context_successor
+            observations_context, rewards_context, actions_context, mask = (
+                context_policy
             )
+            (
+                observations_successor,
+                rewards_successor,
+                actions_successor,
+                mask,
+            ) = context_successor
+
+        timesteps = torch.arange(T).unsqueeze(0).to(self.device)
 
         for ts in range(self.cfg.env.episode_length):
             # [N, T, A]
@@ -111,8 +119,8 @@ class FETETrainer(BaseTrainer):
                 to_numpy(action_t)
             )
 
-            # NOTE: only update context if we are exploring
-            if policy_type == "explore":
+            # NOTE: only update context if we are exploring or if we are evaluating
+            if policy_type == "explore" or stage == "eval":
                 next_state = torch.from_numpy(next_state).to(self.device)
                 action_t = action_t.float()
                 reward = torch.from_numpy(reward).to(self.device).unsqueeze(-1).float()
@@ -137,47 +145,54 @@ class FETETrainer(BaseTrainer):
                 actions_successor = torch.cat([actions_successor, action_t], dim=1)[
                     :, 1:
                 ]
+            else:
+                reward = torch.from_numpy(reward).to(self.device).unsqueeze(-1).float()
 
             episode_return += reward
 
             if done:
                 break
 
-        context_policy = [observations_context, rewards_context, actions_context]
+        context_policy = [
+            observations_context,
+            rewards_context,
+            actions_context,
+            mask,
+        ]
         context_successor = [
             observations_successor,
             rewards_successor,
             actions_successor,
+            mask,
         ]
 
-        if policy_type == "explore":
-            return episode_return, temp_loss, context_policy, context_successor
-        else:
-            return episode_return, temp_loss, None, None
+        return episode_return, temp_loss, context_policy, context_successor
 
     def train_step(self):
         self.model.train()
         self.optimizer.zero_grad()
 
         update_time = time.time()
-        total_loss = 0.0
-        best_r = 0.0  # TODO: set this as env parameter
+        total_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
+        best_r = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
 
         # rollout N episodes
-        for ep_idx in range(self.cfg.env.num_meta_episodes):
-            with torch.amp.autocast("cuda"):
+        with torch.amp.autocast("cuda"):
+            for ep_idx in range(self.cfg.num_episodes):
                 r_explore, l_explore, context_policy, context_successor = (
-                    self.rollout_meta_episode("explore")
+                    self.rollout_meta_episode("explore", stage="train")
                 )
                 r_exploit, l_exploit, _, _ = self.rollout_meta_episode(
-                    "exploit", context_policy, context_successor
+                    "exploit", context_policy, context_successor, stage="train"
                 )
 
-                if r_exploit > best_r:
-                    total_loss += l_exploit
-                if r_explore > best_r:
-                    total_loss += l_explore
-                    best_r = r_exploit
+                mask = r_exploit > best_r
+                total_loss += l_exploit * mask
+
+                mask2 = r_explore > best_r
+                total_loss += l_explore * mask2
+
+                best_r = r_exploit * mask + best_r * (1 - mask2.int())
 
         self.scaler.scale(total_loss).backward()
         # Unscale gradients to prepare for gradient clipping
@@ -204,34 +219,59 @@ class FETETrainer(BaseTrainer):
 
         return train_metrics
 
-    def eval_step(self, batch_size: int):
+    def eval(self):
+        log(
+            " ======================= Running evaluation episodes ======================= ",
+            color="blue",
+        )
         self.model.eval()
+
+        num_explore = 1
+        num_exploit = self.cfg.num_episodes - num_explore
+
         with torch.no_grad():
-            states = self.batch_mset(batch_size)
-            actions = torch.randint(
-                0, self.cfg.env.act_dim, (batch_size, self.cfg.env.seq_len - 1)
-            ).to(self.device)
-            rewards = self.reward_sequence(states, actions)
-            running_max = self.max_in_seq(rewards)
-            _, loss = self.exploit(
-                states, actions, rewards, running_max, epsilon=self.cfg.train.epsilon
-            )
-            return loss.item()
+            # we combine the exploit and explore policies for evaluation
+            for _ in range(num_explore):
+                r_explore, _, context_policy, context_successor = (
+                    self.rollout_meta_episode("explore", stage="eval")
+                )
+
+            for _ in range(num_exploit):
+                r_exploit, _, context_policy, context_successor = (
+                    self.rollout_meta_episode(
+                        "exploit", context_policy, context_successor, stage="eval"
+                    )
+                )
+
+            ep_return = r_explore + r_exploit
+            mean_ep_return = ep_return.mean().item()
+            std_ep_return = ep_return.std().item()
+
+            eval_metrics = {
+                "eval/mean_ep_ret": mean_ep_return,
+                "eval/std_ep_ret": std_ep_return,
+            }
+
+        return eval_metrics
 
     def train(self):
+        if not self.cfg.skip_first_eval:
+            eval_metrics = self.eval()
+
         for self.current_epoch in tqdm.tqdm(
             range(self.cfg.num_epochs), desc="Training", total=self.cfg.num_epochs
         ):
             train_metrics = self.train_step()
 
             if self.current_epoch % self.cfg.eval_every == 0:
-                eval_metrics = self.eval_step()
+                eval_metrics = self.eval()
 
                 if self.cfg.use_wandb:
                     wandb.log(eval_metrics)
 
                 log(
-                    f"Epoch {self.current_epoch}: Train Loss = {train_metrics['loss']:.4f}, Eval Loss = {eval_metrics['loss']:.4f}"
+                    f"Epoch {self.current_epoch}: Train Loss = {train_metrics['loss']:.4f}, Eval Mean Ep Ret = {eval_metrics['eval/mean_ep_ret']:.4f}, Eval Std Ep Ret = {eval_metrics['eval/std_ep_ret']:.4f}",
+                    color="blue",
                 )
 
             # update behavior policy to be same as successor policy every T epochs

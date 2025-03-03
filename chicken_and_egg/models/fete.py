@@ -77,7 +77,6 @@ class FETEPolicy(BaseModel):
         self.embed_reward = nn.Linear(1, cfg.hidden_dim)
         self.embed_action = nn.Linear(1, cfg.hidden_dim)
         self.embed_observation = nn.Linear(cfg.obs_dim, cfg.hidden_dim)
-        self.action_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
 
         # GPT-style transformer model
         self.transformer = TransformerModel(cfg)
@@ -117,10 +116,7 @@ class FETEPolicy(BaseModel):
             attention_mask=attention_mask,
         )
 
-        # Predict action
-        action_logits = self.action_head(output)
-
-        return action_logits
+        return output
 
 
 class FETE(BaseModel):
@@ -131,21 +127,22 @@ class FETE(BaseModel):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
 
-        self.explore_policy = FETEPolicy(cfg)
-        self.exploit_policy = FETEPolicy(cfg)
+        self.policy_backbone = FETEPolicy(cfg)
 
-        # make sure the explore and exploit policies are initialized to be the same
-        self._copy_params(self.explore_policy, self.exploit_policy)
+        # Explore and exploit share the same backbone but different output heads
+        self.explore_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
+        self.exploit_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
 
-        self.successor_explore_policy = FETEPolicy(cfg)
-        self.successor_exploit_policy = FETEPolicy(cfg)
+        self.successor_backbone = FETEPolicy(cfg)
 
-        self._copy_params(self.successor_explore_policy, self.successor_exploit_policy)
+        self.successor_explore_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
+        self.successor_exploit_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
 
     def update_behavior_policy(self):
         # copy weights from successor to behavior
-        self._copy_params(self.successor_explore_policy, self.explore_policy)
-        self._copy_params(self.successor_exploit_policy, self.exploit_policy)
+        self._copy_params(self.successor_backbone, self.policy_backbone)
+        self._copy_params(self.successor_explore_head, self.explore_head)
+        self._copy_params(self.successor_exploit_head, self.exploit_head)
 
     def _copy_params(self, src_policy, dst_policy):
         for param, successor_param in zip(
@@ -164,12 +161,19 @@ class FETE(BaseModel):
         policy_type: str = "explore_behavior",
     ):
         if policy_type == "explore_behavior":
-            policy = self.explore_policy
+            head = self.explore_head
         elif policy_type == "explore_successor":
-            policy = self.successor_explore_policy
+            head = self.successor_explore_head
         elif policy_type == "exploit_behavior":
-            policy = self.exploit_policy
+            head = self.exploit_head
         elif policy_type == "exploit_successor":
-            policy = self.successor_exploit_policy
+            head = self.successor_exploit_head
 
-        return policy(observations, actions, rewards, timesteps, attention_mask)
+        if "behavior" in policy_type:
+            backbone = self.policy_backbone
+        elif "successor" in policy_type:
+            backbone = self.successor_backbone
+
+        output = backbone(observations, actions, rewards, timesteps, attention_mask)
+        output = head(output)
+        return output
