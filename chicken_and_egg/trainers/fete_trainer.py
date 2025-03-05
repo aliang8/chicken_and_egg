@@ -4,7 +4,6 @@ from typing import List
 import einops
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 import torch
 import torch.nn.functional as F
 import tqdm
@@ -15,12 +14,6 @@ from chicken_and_egg.models.fete import FETE
 from chicken_and_egg.trainers.base_trainer import BaseTrainer
 from chicken_and_egg.utils.general_utils import to_numpy
 from chicken_and_egg.utils.logger import log
-
-sns.set_style("white")
-sns.set_style("ticks")
-sns.set_context("talk")
-plt.rc("text", usetex=True)  # camera-ready formatting + latex in plots
-plt.rc("font", family="serif")
 
 
 class FETETrainer(BaseTrainer):

@@ -4,15 +4,23 @@ from pathlib import Path
 from typing import Dict
 
 import numpy as np
+import seaborn as sns
 import torch
 import wandb
 from hydra.core.hydra_config import HydraConfig
+from matplotlib import pyplot as plt
 from omegaconf import DictConfig, OmegaConf
 from torch.cuda.amp import GradScaler
 
 from chicken_and_egg.envs.utils import make_envs
 from chicken_and_egg.utils.general_utils import omegaconf_to_dict, prefix_dict_keys
 from chicken_and_egg.utils.logger import log
+
+sns.set_style("white")
+sns.set_style("ticks")
+sns.set_context("talk")
+plt.rc("text", usetex=True)  # camera-ready formatting + latex in plots
+plt.rc("font", family="serif")
 
 
 class BaseTrainer:
