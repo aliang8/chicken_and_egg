@@ -96,6 +96,8 @@ class BaseTrainer:
                 self.log_dir.mkdir(parents=True, exist_ok=True)
 
                 if self.cfg.use_wandb:
+                    self.cfg.wandb.name = self.cfg.hp_name
+
                     self.wandb_run = wandb.init(
                         # set the wandb project where this run will be logged
                         entity=self.cfg.wandb.entity,

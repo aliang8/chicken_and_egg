@@ -30,7 +30,7 @@ lr_scheduler:
     factor: 1
 
 # wandb configurations
-use_wandb: False
+use_wandb: True
 clip_grad_norm: 1.0
 
 # training
