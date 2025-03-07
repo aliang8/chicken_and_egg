@@ -3,16 +3,24 @@ import collections
 import tqdm
 from omegaconf import DictConfig
 
+from chicken_and_egg.models.dream_dqn import RecurrentDQNPolicy
 from chicken_and_egg.trainers.base_trainer import BaseTrainer
 
 
 class DREAMTrainer(BaseTrainer):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
+        self.current_epoch = 0
 
     def setup_model(self):
-        model = DREAM(self.cfg.model)
+        model = RecurrentDQNPolicy(self.cfg.model)
         return model
+
+    def rollout_meta_episode(self):
+        pass
+
+    def train_step(self):
+        pass
 
     def eval(self):
         pass

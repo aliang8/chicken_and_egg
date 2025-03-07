@@ -1,0 +1,5 @@
+env_name: cooking
+env_id: test
+obs_dim: 9
+act_dim: 6
+episode_length: 20

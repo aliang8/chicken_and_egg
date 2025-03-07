@@ -95,14 +95,12 @@ class BaseTrainer:
                 self.video_dir.mkdir(parents=True, exist_ok=True)
                 self.log_dir.mkdir(parents=True, exist_ok=True)
 
-                wandb_name = self.cfg.wandb.name
-
                 if self.cfg.use_wandb:
                     self.wandb_run = wandb.init(
                         # set the wandb project where this run will be logged
                         entity=self.cfg.wandb.entity,
                         project=self.cfg.wandb.project,
-                        name=wandb_name,
+                        name=self.cfg.wandb.name,
                         notes=self.cfg.wandb.notes,
                         tags=self.cfg.wandb.tags,
                         # track hyperparameters and run metadata

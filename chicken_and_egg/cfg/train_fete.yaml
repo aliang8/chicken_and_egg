@@ -1,5 +1,5 @@
 name: fete 
-hp_name: fete_bt-${env.bandit_type}_s-${seed}
+hp_name: fete_bt-${env.env_name}_s-${seed}
 
 update_behavior_every: 10
 
