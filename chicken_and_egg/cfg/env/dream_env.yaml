@@ -1,0 +1,5 @@
+env_name: vanilla
+env_id: test
+obs_dim: 10  # Adjust based on your environment
+act_dim: 10  # Adjust based on your environment
+episode_length: 50 

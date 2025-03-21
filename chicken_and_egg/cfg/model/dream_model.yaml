@@ -1,0 +1,33 @@
+# Base model settings
+hidden_dim: 64
+max_seq_len: 50
+dropout: 0.1
+
+# Instruction embedder settings
+instruction_embedder:
+  type: instruction
+  obs_embed_dim: 64
+  instruction_embed_dim: 64
+  transition_embed_dim: 64
+  action_embed_dim: 32
+  attention_query_dim: 64
+  trajectory_embedder:
+    type: ours
+    penalty: 0.1
+  recurrent:
+    hidden_size: 64
+    num_layers: 1
+
+# Exploration embedder settings  
+exploration_embedder:
+  type: recurrent
+  state_embed_dim: 64
+  action_embed_dim: 16
+  embed_dim: 64
+  recurrent:
+    hidden_size: 64
+    num_layers: 1
+
+# Environment dimensions
+obs_dim: ${env.obs_dim}
+act_dim: ${env.act_dim} 
