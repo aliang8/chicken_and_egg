@@ -50,7 +50,7 @@ class TransformerModel(nn.Module):
         super().__init__()
         self.cfg = cfg
         # Standard transformer encoder components
-        self.wpe = nn.Embedding(cfg.max_seq_len, cfg.hidden_dim)
+        self.positional_encodings = nn.Embedding(cfg.max_seq_len, cfg.hidden_dim)
         self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList(
             [TransformerBlock(cfg) for _ in range(cfg.num_layers)]
@@ -58,7 +58,7 @@ class TransformerModel(nn.Module):
         self.ln_f = nn.LayerNorm(cfg.hidden_dim)
 
     def forward(self, input_embeds, timesteps, attention_mask=None):
-        position_embeds = self.wpe(timesteps)
+        position_embeds = self.positional_encodings(timesteps)
         hidden_states = input_embeds + position_embeds
         hidden_states = self.drop(hidden_states)
 

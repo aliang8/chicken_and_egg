@@ -1,18 +1,8 @@
-defaults:
-  - env: bandit
-  - model: fete_gpt2
-  - local: default 
-  - hydra: default 
-  - override hydra/launcher: local
-  - _self_
-
 seed: 4
 datetime: ${now:%Y-%m-%d}-${now:%H-%M-%S}
 
 data:
   batch_size: 128
-
-debug: False
 
 # optimizer and scheduling
 optimizer:
@@ -43,9 +33,15 @@ num_epochs: 100
 num_train_envs: 1
 num_eval_envs: 1
 num_episodes: 5
+debug: False
 
-paths:
-  # root_dir: set this in untracked local/default.yaml
-  results_dir: ${paths.root_dir}/results
+hp_name: null # TODO: fill this in
+run_id: null # TODO: fill this in
 
-hp_name: "" # TODO: fill this in
+defaults:
+  - env: bandit
+  - model: fete_gpt2
+  - local: default 
+  - hydra: default 
+  - override hydra/launcher: local
+  - _self_

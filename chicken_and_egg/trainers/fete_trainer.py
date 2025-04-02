@@ -1,5 +1,5 @@
 import time
-from typing import List
+from typing import Dict
 
 import einops
 import matplotlib.pyplot as plt
@@ -28,8 +28,8 @@ class FETETrainer(BaseTrainer):
     def rollout_meta_episode(
         self,
         policy_type: str,
-        context_policy: List[torch.Tensor] = None,
-        context_successor: List[torch.Tensor] = None,
+        context_policy: Dict[str, torch.Tensor] = None,
+        context_successor: Dict[str, torch.Tensor] = None,
         stage: str = "train",
     ):
         """
@@ -41,8 +41,8 @@ class FETETrainer(BaseTrainer):
         Returns:
             episode_return: float
             temp_loss: float
-            context_policy: [observations, rewards, actions]
-            context_successor: [observations, rewards, actions]
+            context_policy: Dict[str, torch.Tensor], [N, T, ...]
+            context_successor: Dict[str, torch.Tensor]
         """
         temp_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
         episode_return = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
@@ -65,6 +65,17 @@ class FETETrainer(BaseTrainer):
         # add the new observations to the context
         observations_context = torch.cat([observations_context, obs], dim=1)[:, 1:]
         observations_successor = torch.cat([observations_successor, obs], dim=1)[:, 1:]
+
+        # roll mask
+        mask = torch.roll(mask, shifts=-1, dims=1)
+        # roll all of the others
+        actions_context = torch.roll(actions_context, shifts=-1, dims=1)
+        rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
+        actions_successor = torch.roll(actions_successor, shifts=-1, dims=1)
+        rewards_successor = torch.roll(rewards_successor, shifts=-1, dims=1)
+
+        # set the last mask to 1
+        mask[:, -1] = 1
 
         for ts in range(self.cfg.env.episode_length):
             # [N, T, A], do not update the gradients for the behavior policy
@@ -106,40 +117,36 @@ class FETETrainer(BaseTrainer):
                 to_numpy(action_t)
             )
 
-            # NOTE: only update context if we are exploring or if we are evaluating
-            if policy_type == "explore" or stage == "eval":
-                next_state = torch.from_numpy(next_state).to(self.device)
-                action_t = action_t.float()
-                reward = torch.from_numpy(reward).to(self.device).unsqueeze(-1).float()
+            next_state = torch.from_numpy(next_state).to(self.device)
+            action_t = action_t.float()
+            reward = torch.from_numpy(reward).to(self.device).unsqueeze(-1).float()
 
-                # update context by appending new state, reward and action
-                observations_context = torch.cat(
-                    [observations_context, next_state.unsqueeze(1)], dim=1
-                )[:, 1:]
-                rewards_context = torch.cat(
-                    [rewards_context, reward.unsqueeze(1)], dim=1
-                )[:, 1:]
-                action_t = einops.repeat(action_t, "b -> b t a", t=1, a=1).detach()
-                actions_context = torch.cat([actions_context, action_t], dim=1)[:, 1:]
+            # update context by appending new state, reward and action
+            observations_context = torch.cat(
+                [observations_context, next_state.unsqueeze(1)], dim=1
+            )[:, 1:]
 
-                timesteps = torch.cat(
-                    [timesteps, torch.ones_like(timesteps)[:, :1] * (ts + 1)], dim=1
-                )[:, 1:]
-                mask = torch.cat([mask, torch.ones_like(mask)[:, :1]], dim=1)[:, 1:]
+            # apply roll here is to account for the
+            # first observation which doesn't have an associated reward / action
+            rewards_context[:, -1] = reward
+            rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
+            action_t = einops.repeat(action_t, "b -> b t a", t=1, a=1).detach()
+            actions_context[:, -1] = action_t
+            actions_context = torch.roll(actions_context, shifts=-1, dims=1)
 
-                # update successor context by appending new state, reward and action
-                observations_successor = torch.cat(
-                    [observations_successor, next_state.unsqueeze(1)], dim=1
-                )[:, 1:]
-                rewards_successor = torch.cat(
-                    [rewards_successor, reward.unsqueeze(1)], dim=1
-                )[:, 1:]
-                actions_successor = torch.cat([actions_successor, action_t], dim=1)[
-                    :, 1:
-                ]
-            else:
-                reward = torch.from_numpy(reward).to(self.device).unsqueeze(-1).float()
+            timesteps = torch.cat(
+                [timesteps, torch.ones_like(timesteps)[:, :1] * (ts + 1)], dim=1
+            )[:, 1:]
+            mask = torch.cat([mask, torch.ones_like(mask)[:, :1]], dim=1)[:, 1:]
 
+            # update successor context by appending new state, reward and action
+            observations_successor = torch.cat(
+                [observations_successor, next_state.unsqueeze(1)], dim=1
+            )[:, 1:]
+            rewards_successor[:, -1] = reward
+            rewards_successor = torch.roll(rewards_successor, shifts=-1, dims=1)
+            actions_successor[:, -1] = action_t
+            actions_successor = torch.roll(actions_successor, shifts=-1, dims=1)
             episode_return += reward
 
             if done:
@@ -163,6 +170,8 @@ class FETETrainer(BaseTrainer):
 
     def _init_context(self):
         T = self.cfg.env.episode_length * self.cfg.num_episodes
+        # add some dummy timesteps for the reset
+        T += self.cfg.num_episodes
 
         # keep track of context here for observation, reward and action
         O = self.cfg.env.obs_dim
@@ -173,7 +182,6 @@ class FETETrainer(BaseTrainer):
         rewards_context = torch.zeros(1, T, 1).to(self.device)
         actions_context = torch.zeros(1, T, 1).to(self.device)
         mask = torch.zeros(1, T).to(self.device)
-        mask[:, -1] = 1
         timesteps = torch.zeros(1, T).to(self.device).long()
 
         # create context for the successor explore/exploit policy
@@ -224,10 +232,14 @@ class FETETrainer(BaseTrainer):
                 )
 
                 # exploit episode is 'informative'
+                # good exploit episodes meet or surpass previous exploit returns in the
+                # meta-rollout sequence
                 mask = r_exploit >= best_r
                 total_loss += l_exploit * mask
 
                 # explore episode is 'maximal'
+                # good explore episodes are followed by the exploit policy achieving
+                # higher episode returns than those seen so far
                 mask2 = r_exploit > best_r
                 total_loss += l_explore * mask2
                 # best_r = r_exploit * mask + best_r * (1 - mask2.int())
@@ -240,7 +252,7 @@ class FETETrainer(BaseTrainer):
                 else:
                     best_r = best_r
 
-                log(f"Epoch: {self.current_epoch}, Best R: {best_r}")
+                # log(f"Epoch: {self.current_epoch}, Best R: {best_r}")
 
         # average loss over number of environments
         total_loss = total_loss.mean()
@@ -339,6 +351,13 @@ class FETETrainer(BaseTrainer):
         for self.current_epoch in tqdm.tqdm(
             range(self.cfg.num_epochs), desc="Training", total=self.cfg.num_epochs
         ):
+            # update behavior policy to be same as successor policy every T epochs
+            if self.current_epoch % self.cfg.update_behavior_every == 0:
+                log(
+                    "Updating behavior policy to match successor policy", color="yellow"
+                )
+                self.model.update_behavior_policy()
+
             train_metrics = self.train_step()
 
             if self.current_epoch % self.cfg.eval_every == 0:
@@ -351,10 +370,6 @@ class FETETrainer(BaseTrainer):
                     f"Epoch {self.current_epoch}: Train Loss = {train_metrics['loss']:.4f}, Eval Mean Ep Ret = {eval_metrics['eval/mean_ep_ret']:.4f}, Eval Std Ep Ret = {eval_metrics['eval/std_ep_ret']:.4f}",
                     color="blue",
                 )
-
-            # update behavior policy to be same as successor policy every T epochs
-            if self.current_epoch % self.cfg.update_behavior_every == 0:
-                self.model.update_behavior_policy()
 
         if self.wandb_run is not None:
             self.wandb_run.finish()

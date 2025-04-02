@@ -4,3 +4,4 @@ obs_dim: 10
 act_dim: 10
 episode_length: 10
 bandit_type: mean
+hp_name: bt-${env.bandit_type}
