@@ -32,7 +32,7 @@ skip_first_eval: False
 num_epochs: 100
 num_train_envs: 1
 num_eval_envs: 1
-num_episodes: 5
+num_trials: 5
 debug: False
 
 hp_name: null # TODO: fill this in

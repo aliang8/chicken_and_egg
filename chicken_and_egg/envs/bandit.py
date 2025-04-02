@@ -25,15 +25,15 @@ class Bandit(gym.Env):
     def gen_arm_means(self):
         return torch.normal(0, 1, (self.n,))
 
-    def reset(self, seed=None, arm_means=None, **kwargs):
+    def reset(self, seed=None, arm_means=None, sample_arm_means=False, **kwargs):
         if arm_means is None:
             arm_means = self.arm_means
         self.current_state = arm_means
-        return arm_means, {"reward": 0}
 
-    def meta_reset(self):
-        arm_means = self.gen_arm_means()
-        self.current_state = arm_means
+        if sample_arm_means:
+            arm_means = self.gen_arm_means()
+            self.current_state = arm_means
+
         return arm_means, {"reward": 0}
 
     def step(self, action):
@@ -69,15 +69,15 @@ class MeanBandit(Bandit):
         means[0] = self.minval
         return means
 
-    def reset(self, seed=None, arm_means=None, **kwargs):
+    def reset(self, seed=None, arm_means=None, sample_arm_means=False, **kwargs):
         if arm_means is None:
             arm_means = self.arm_means
         self.current_state = arm_means
-        return arm_means, {"reward": 0}
 
-    def meta_reset(self):
-        arm_means = self.gen_arm_means()
-        self.current_state = arm_means
+        if sample_arm_means:
+            arm_means = self.gen_arm_means()
+            self.current_state = arm_means
+
         return arm_means, {"reward": 0}
 
     def step(self, action):

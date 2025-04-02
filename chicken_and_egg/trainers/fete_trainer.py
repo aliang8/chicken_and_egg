@@ -26,11 +26,7 @@ class FETETrainer(BaseTrainer):
         return model
 
     def rollout_meta_episode(
-        self,
-        policy_type: str,
-        context_policy: Dict[str, torch.Tensor] = None,
-        context_successor: Dict[str, torch.Tensor] = None,
-        stage: str = "train",
+        self, policy_type: str, context: Dict[str, torch.Tensor] = None
     ):
         """
         Rollout the exploration behavior and successor policies.
@@ -41,63 +37,52 @@ class FETETrainer(BaseTrainer):
         Returns:
             episode_return: float
             temp_loss: float
-            context_policy: Dict[str, torch.Tensor], [N, T, ...]
-            context_successor: Dict[str, torch.Tensor]
+            context: Dict[str, torch.Tensor], [N, T, ...]
         """
         temp_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
         episode_return = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
 
         # for exploitation, use the context from the exploration policy
-        observations_context = context_policy["observations"]
-        rewards_context = context_policy["rewards"]
-        actions_context = context_policy["actions"]
-        mask = context_policy["mask"]
-        timesteps = context_policy["timesteps"]
-        observations_successor = context_successor["observations"]
-        rewards_successor = context_successor["rewards"]
-        actions_successor = context_successor["actions"]
+        observations_context = context["observations"]
+        rewards_context = context["rewards"]
+        actions_context = context["actions"]
+        mask = context["mask"]
+        timesteps = context["timesteps"]
 
         # run a meta_reset here
-        temp = self.train_envs.call("meta_reset")
-        obs = [o for o, _ in temp]
-        obs = torch.stack(obs, dim=0).to(self.device).unsqueeze(1)
+        obs, _ = self.train_envs.reset()
+        obs = torch.from_numpy(obs).to(self.device).unsqueeze(1)
 
         # add the new observations to the context
         observations_context = torch.cat([observations_context, obs], dim=1)[:, 1:]
-        observations_successor = torch.cat([observations_successor, obs], dim=1)[:, 1:]
 
         # roll mask
         mask = torch.roll(mask, shifts=-1, dims=1)
         # roll all of the others
         actions_context = torch.roll(actions_context, shifts=-1, dims=1)
         rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
-        actions_successor = torch.roll(actions_successor, shifts=-1, dims=1)
-        rewards_successor = torch.roll(rewards_successor, shifts=-1, dims=1)
-
         # set the last mask to 1
         mask[:, -1] = 1
 
-        for ts in range(self.cfg.env.episode_length):
+        for ts in range(self.cfg.env.timesteps_per_trial):
             # [N, T, A], do not update the gradients for the behavior policy
             # these will be updated by copying the weights from the successor policy
+            policy_kwargs = {
+                "observations": observations_context,
+                "actions": actions_context,
+                "rewards": rewards_context,
+                "timesteps": timesteps,
+                "attention_mask": mask,
+            }
+
             with torch.no_grad():
                 behavior_logits = self.model(
-                    observations=observations_context,
-                    actions=actions_context,
-                    rewards=rewards_context,
-                    timesteps=timesteps,
-                    attention_mask=mask,
-                    policy_type=f"{policy_type}_behavior",
+                    **policy_kwargs, policy_type=f"{policy_type}_behavior"
                 )
 
             # [N, T, A]
             successor_logits = self.model(
-                observations=observations_successor,
-                actions=actions_successor,
-                rewards=rewards_successor,
-                timesteps=timesteps,
-                attention_mask=mask,
-                policy_type=f"{policy_type}_successor",
+                **policy_kwargs, policy_type=f"{policy_type}_successor"
             )
 
             # compute hadamard product of logits
@@ -138,40 +123,24 @@ class FETETrainer(BaseTrainer):
                 [timesteps, torch.ones_like(timesteps)[:, :1] * (ts + 1)], dim=1
             )[:, 1:]
             mask = torch.cat([mask, torch.ones_like(mask)[:, :1]], dim=1)[:, 1:]
-
-            # update successor context by appending new state, reward and action
-            observations_successor = torch.cat(
-                [observations_successor, next_state.unsqueeze(1)], dim=1
-            )[:, 1:]
-            rewards_successor[:, -1] = reward
-            rewards_successor = torch.roll(rewards_successor, shifts=-1, dims=1)
-            actions_successor[:, -1] = action_t
-            actions_successor = torch.roll(actions_successor, shifts=-1, dims=1)
             episode_return += reward
 
             if done:
                 break
 
-        context_policy = {
+        new_context = {
             "observations": observations_context,
             "rewards": rewards_context,
             "actions": actions_context,
             "mask": mask,
             "timesteps": timesteps,
         }
-
-        context_successor = {
-            "observations": observations_successor,
-            "rewards": rewards_successor,
-            "actions": actions_successor,
-        }
-
-        return episode_return, temp_loss, context_policy, context_successor
+        return episode_return, temp_loss, new_context
 
     def _init_context(self):
-        T = self.cfg.env.episode_length * self.cfg.num_episodes
+        T = self.cfg.env.timesteps_per_trial * self.cfg.num_trials
         # add some dummy timesteps for the reset
-        T += self.cfg.num_episodes
+        T += self.cfg.num_trials
 
         # keep track of context here for observation, reward and action
         O = self.cfg.env.obs_dim
@@ -184,30 +153,14 @@ class FETETrainer(BaseTrainer):
         mask = torch.zeros(1, T).to(self.device)
         timesteps = torch.zeros(1, T).to(self.device).long()
 
-        # create context for the successor explore/exploit policy
-        observations_successor = torch.zeros(1, T, O).to(self.device)
-        rewards_successor = torch.zeros(1, T, 1).to(self.device)
-        actions_successor = torch.zeros(1, T, 1).to(self.device)
-
-        # initialize context with random action and observation
-        # obs, info = self.train_envs.reset()
-        # obs = torch.from_numpy(obs).to(self.device)
-        # observations_context[:, -1] = obs
-
-        context_policy = {
+        context = {
             "observations": observations_context,
             "rewards": rewards_context,
             "actions": actions_context,
             "mask": mask,
             "timesteps": timesteps,
         }
-        context_successor = {
-            "observations": observations_successor,
-            "rewards": rewards_successor,
-            "actions": actions_successor,
-        }
-
-        return context_policy, context_successor
+        return context
 
     def train_step(self):
         self.model.train()
@@ -220,16 +173,12 @@ class FETETrainer(BaseTrainer):
 
         # rollout N episodes
         with torch.amp.autocast("cuda"):
-            context_policy, context_successor = self._init_context()
-            for ep_idx in range(self.cfg.num_episodes):
-                r_explore, l_explore, context_policy, context_successor = (
-                    self.rollout_meta_episode(
-                        "explore", context_policy, context_successor, stage="train"
-                    )
+            context = self._init_context()
+            for ep_idx in range(self.cfg.num_trials):
+                r_explore, l_explore, context = self.rollout_meta_episode(
+                    "explore", context
                 )
-                r_exploit, l_exploit, _, _ = self.rollout_meta_episode(
-                    "exploit", context_policy, context_successor, stage="train"
-                )
+                r_exploit, l_exploit, _ = self.rollout_meta_episode("exploit", context)
 
                 # exploit episode is 'informative'
                 # good exploit episodes meet or surpass previous exploit returns in the
@@ -288,8 +237,10 @@ class FETETrainer(BaseTrainer):
         plt.figure(figsize=(10, 5))
         plt.plot(ep_ret)
         # add vertical line at each episode end
-        for i in range(self.cfg.num_episodes):
-            plt.axvline(x=i * self.cfg.env.episode_length, color="k", linestyle="--")
+        for i in range(self.cfg.num_trials):
+            plt.axvline(
+                x=i * self.cfg.env.timesteps_per_trial, color="k", linestyle="--"
+            )
 
         plt.title("Episode Return")
         plt.xlabel("Environment Steps")
@@ -297,6 +248,7 @@ class FETETrainer(BaseTrainer):
         plt.tight_layout()
 
         self.log_to_wandb({"ep_ret": wandb.Image(plt)}, prefix="plots/")
+        plt.close()
 
     def eval(self):
         log(
@@ -306,34 +258,26 @@ class FETETrainer(BaseTrainer):
         self.model.eval()
 
         num_explore = 1
-        num_exploit = self.cfg.num_episodes - num_explore
+        num_exploit = self.cfg.num_trials - num_explore
 
-        context_policy, context_successor = self._init_context()
+        context = self._init_context()
         with torch.no_grad():
             # we combine the exploit and explore policies for evaluation
             for _ in range(num_explore):
-                r_explore, _, context_policy, context_successor = (
-                    self.rollout_meta_episode(
-                        "explore", context_policy, context_successor, stage="eval"
-                    )
-                )
+                r_explore, _, context = self.rollout_meta_episode("explore", context)
 
             for _ in range(num_exploit):
-                r_exploit, _, context_policy, context_successor = (
-                    self.rollout_meta_episode(
-                        "exploit", context_policy, context_successor, stage="eval"
-                    )
-                )
+                r_exploit, _, context = self.rollout_meta_episode("exploit", context)
 
             ep_return = r_explore + r_exploit
             mean_ep_return = ep_return.mean().item()
             std_ep_return = ep_return.std().item()
 
             # generate some visualizations of the return over time
-            rewards = context_policy["rewards"]
+            rewards = context["rewards"]
             rewards = rewards.cpu().numpy()
-            actions = context_policy["actions"]
-            observations = context_policy["observations"]
+            actions = context["actions"]
+            observations = context["observations"]
 
             self._generate_plots(rewards)
 

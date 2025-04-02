@@ -1,6 +1,6 @@
 n_head: 4
 hidden_dim: 128
-max_seq_len: ${eval:${env.episode_length} * ${num_episodes}}
+max_seq_len: ${eval:${env.timesteps_per_trial} * ${num_episodes}}
 dropout: 0.1
 num_layers: 4
 

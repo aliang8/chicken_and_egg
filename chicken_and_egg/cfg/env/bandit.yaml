@@ -2,6 +2,6 @@ env_name: bandit_${env.bandit_type}
 env_id: test
 obs_dim: 10
 act_dim: 10
-episode_length: 10
+timesteps_per_trial: 10
 bandit_type: mean
 hp_name: bt-${env.bandit_type}
