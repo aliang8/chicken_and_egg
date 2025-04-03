@@ -31,7 +31,7 @@ mode: train
 skip_first_eval: False
 num_epochs: 100
 num_train_envs: 1
-num_eval_envs: 10
+num_eval_envs: 1
 num_trials: 5
 debug: False
 

@@ -3,10 +3,10 @@ job:
 
 output_subdir: null
 run:
-  dir: ${paths.results_dir}/${name}/${datetime}/${env.env_name}-${env.env_id}/${hp_name}
+  dir: ${paths.results_dir}/${name}/${env.env_name}-${env.env_id}/${hp_name}
 
 sweep:
-  dir: ${paths.results_dir}/${name}/${datetime}/${env.env_name}-${env.env_id}
+  dir: ${paths.results_dir}/${name}/${env.env_name}-${env.env_id}
   subdir: ${hp_name}
 
 job_logging:
@@ -15,7 +15,7 @@ job_logging:
   handlers:
     file:
       class: logging.FileHandler
-      filename: ${paths.results_dir}/${name}/${datetime}/${env.env_name}-${env.env_id}/log.txt
+      filename: ${paths.results_dir}/${name}/${env.env_name}-${env.env_id}/log.txt
       mode: w
       formatter: simple
     console:

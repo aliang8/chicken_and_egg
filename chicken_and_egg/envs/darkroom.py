@@ -55,13 +55,7 @@ class DarkRoom(gym.Env):
 
         obs = self.get_obs(ax, ay)
         self.current_state = (ax, ay)
-        return (
-            obs,
-            reward,
-            False,
-            False,
-            {"reward": reward, "rx": self.rx, "ry": self.ry},
-        )
+        return (obs, reward, False, False, self.get_info())
 
     def reset(self, seed: int = None, **kwargs):
         if seed is not None:
@@ -76,7 +70,16 @@ class DarkRoom(gym.Env):
 
         self.current_state = (ax, ay)
 
-        return self.get_obs(ax, ay), {"reward": 0, "rx": self.rx, "ry": self.ry}
+        return self.get_obs(ax, ay), self.get_info()
+
+    def get_info(self):
+        return {
+            "rx": self.rx,
+            "ry": self.ry,
+            "rr": self.rr,
+            "w": self.w,
+            "h": self.h,
+        }
 
     def get_obs(self, ax, ay):
         return np.array([ax, ay])

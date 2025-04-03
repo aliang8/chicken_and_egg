@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 from typing import Dict
 
 import einops
@@ -122,6 +123,7 @@ class FETETrainer(BaseTrainer):
                 observations_context = torch.cat(
                     [observations_context, next_state.unsqueeze(1)], dim=1
                 )[:, 1:]
+                mask = torch.cat([mask, torch.ones_like(mask)[:, :1]], dim=1)[:, 1:]
 
             # apply roll here is to account for the
             # first observation which doesn't have an associated reward / action
@@ -134,7 +136,6 @@ class FETETrainer(BaseTrainer):
             timesteps = torch.cat(
                 [timesteps, torch.ones_like(timesteps)[:, :1] * (ts + 1)], dim=1
             )[:, 1:]
-            mask = torch.cat([mask, torch.ones_like(mask)[:, :1]], dim=1)[:, 1:]
             trial_return += reward
 
             # add the trial id to the context
@@ -297,9 +298,136 @@ class FETETrainer(BaseTrainer):
             self.log_to_wandb({"ep_ret": wandb.Image(plt)}, prefix="plots/")
             plt.close()
         elif self.cfg.env.env_name == "darkroom":
-            import ipdb
+            self._generate_darkroom_plots(policy_context)
 
-            ipdb.set_trace()
+    def _generate_darkroom_plots(self, policy_context):
+        """Generate grid-based visualization and animation of darkroom environment showing agent trajectory.
+
+        Args:
+            policy_context: Dict containing observations, rewards, etc.
+        """
+        try:
+            from celluloid import Camera
+        except ImportError:
+            log("Please install celluloid: pip install celluloid", color="red")
+            return
+
+        # Extract relevant information
+        observations = policy_context["observations"]  # [N, T, 2]
+        rewards = policy_context["rewards"]  # [N, T, 1]
+        trial_ids = policy_context["trial_ids"]  # [N, T]
+        infos = policy_context["infos"]  # List of dicts
+
+        # Create figure for each environment
+        for env_idx in range(observations.shape[0]):
+            # Get reward grid information for this environment
+            env_info = infos[env_idx]
+            if "rx" not in env_info or "ry" not in env_info or "rr" not in env_info:
+                continue
+
+            rx = env_info["rx"]
+            ry = env_info["ry"]
+            rr = env_info["rr"]
+            w = int(env_info["w"])
+            h = int(env_info["h"])
+
+            # Create base grid with rewards
+            base_grid = np.zeros((h, w))
+            for x, y, r in zip(rx, ry, rr):
+                base_grid[y, x] = r
+
+            # Get agent trajectory
+            obs = observations[env_idx].cpu().numpy()  # [T, 2]
+            rewards_env = rewards[env_idx].cpu().numpy()  # [T, 1]
+            ret = np.cumsum(rewards_env)  # [T]
+
+            # Create figure and camera for animation
+            fig = plt.figure(figsize=(12, 12))
+            camera = Camera(fig)
+
+            # Create animation frames
+            for t, (x, y) in enumerate(obs):
+                x, y = int(x), int(y)
+
+                # Create current frame's grid
+                current_grid = base_grid.copy()
+
+                # Create path mask for current timestep
+                path_mask_rgb = np.zeros((*base_grid.shape, 4))  # RGBA
+
+                # Add previous path positions
+                for prev_t in range(t):
+                    prev_x, prev_y = int(obs[prev_t, 0]), int(obs[prev_t, 1])
+                    path_mask_rgb[prev_y, prev_x] = [
+                        0,
+                        0,
+                        1,
+                        0.3,
+                    ]  # Light blue for past positions
+
+                # Add current position
+                path_mask_rgb[y, x] = [0, 0, 1, 1]  # Solid blue for current position
+
+                # Mark start position
+                start_x, start_y = int(obs[0, 0]), int(obs[0, 1])
+                path_mask_rgb[start_y, start_x] = [0, 1, 0, 1]  # Solid green
+
+                # Plot the reward grid
+                plt.imshow(current_grid, cmap="YlOrRd", interpolation="nearest")
+                plt.imshow(path_mask_rgb)
+
+                # Add text information
+                current_ret = ret[t] if t < len(ret) else ret[-1]
+                info_text = f"Step: {t}\n"
+                info_text += f"Return: {current_ret:.2f}\n"
+                info_text += f"Trial: {trial_ids[env_idx, t].item()}\n"
+
+                plt.text(
+                    0.02,
+                    0.98,
+                    info_text,
+                    transform=plt.gca().transAxes,
+                    verticalalignment="top",
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+                )
+
+                plt.title(f"Agent Trajectory - Environment {env_idx}")
+                plt.xlabel("X Position")
+                plt.ylabel("Y Position")
+
+                # Add colorbar for reward values
+                plt.colorbar(label="Reward Value")
+
+                # Add custom legend
+                from matplotlib.patches import Patch
+
+                legend_elements = [
+                    Patch(facecolor="blue", alpha=0.3, label="Past Positions"),
+                    Patch(facecolor="blue", label="Current Position"),
+                    Patch(facecolor="green", label="Start"),
+                ]
+                plt.legend(handles=legend_elements)
+
+                # Capture frame
+                camera.snap()
+
+            # Create animation
+            animation = camera.animate(interval=200)  # 200ms between frames
+
+            # Save animation
+            video_path = Path(self.cfg.exp_dir) / f"rollout_{env_idx}.mp4"
+            animation.save(str(video_path), writer="ffmpeg")
+            log(f"Saved rollout animation to {video_path}", color="green")
+
+            # Log to wandb
+            self.log_to_wandb(
+                {
+                    f"rollout_{env_idx}_video": wandb.Video(str(video_path)),
+                },
+                prefix="plots/",
+            )
+
+            plt.close()
 
     def eval(self):
         log(
