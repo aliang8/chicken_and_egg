@@ -57,7 +57,12 @@ class TransformerModel(nn.Module):
         )
         self.ln_f = nn.LayerNorm(cfg.hidden_dim)
 
-    def forward(self, input_embeds, timesteps, attention_mask=None):
+    def forward(
+        self,
+        input_embeds: torch.Tensor,
+        timesteps: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ):
         position_embeds = self.positional_encodings(timesteps)
         hidden_states = input_embeds + position_embeds
         hidden_states = self.drop(hidden_states)
@@ -77,6 +82,7 @@ class FETEPolicy(BaseModel):
         self.embed_reward = nn.Linear(1, cfg.hidden_dim)
         self.embed_action = nn.Linear(1, cfg.hidden_dim)
         self.embed_observation = nn.Linear(cfg.obs_dim, cfg.hidden_dim)
+        self.embed_trial_id = nn.Embedding(cfg.num_trials, cfg.hidden_dim)
 
         # GPT-style transformer model
         self.transformer = TransformerModel(cfg)
@@ -88,6 +94,7 @@ class FETEPolicy(BaseModel):
         actions: torch.Tensor,
         rewards: torch.Tensor,
         timesteps: torch.Tensor,
+        trial_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ):
         """
@@ -108,6 +115,10 @@ class FETEPolicy(BaseModel):
         # Combine embeddings
         embeddings = rew_embeds + act_embeds + obs_embeds
         embeddings = self.ln(embeddings)
+
+        if trial_ids is not None:
+            trial_id_embeds = self.embed_trial_id(trial_ids)
+            embeddings = embeddings + trial_id_embeds
 
         # Pass through transformer
         output = self.transformer(
@@ -158,7 +169,9 @@ class FETE(BaseModel):
         rewards: torch.Tensor,
         timesteps: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        trial_ids: Optional[torch.Tensor] = None,
         policy_type: str = "explore_behavior",
+        **kwargs,
     ):
         if policy_type == "explore_behavior":
             head = self.explore_head
@@ -174,6 +187,13 @@ class FETE(BaseModel):
         elif "successor" in policy_type:
             backbone = self.successor_backbone
 
-        output = backbone(observations, actions, rewards, timesteps, attention_mask)
+        output = backbone(
+            observations=observations,
+            actions=actions,
+            rewards=rewards,
+            timesteps=timesteps,
+            attention_mask=attention_mask,
+            trial_ids=trial_ids,
+        )
         output = head(output)
         return output

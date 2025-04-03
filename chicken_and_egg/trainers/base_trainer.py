@@ -64,22 +64,30 @@ class BaseTrainer:
         # add exp_dir to config
         self.cfg.exp_dir = str(self.exp_dir)
 
+        # set random seeds
+        random.seed(cfg.seed)
+        np.random.seed(cfg.seed)
+        torch.manual_seed(cfg.seed)
+        torch.cuda.manual_seed_all(cfg.seed)
+
+        # Ensure deterministic behavior in CUDA (if applicable)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
         # initialize environments for training and evaluation
         self.train_envs = make_envs(
             env_name=self.cfg.env.env_name,
             num_envs=self.cfg.num_train_envs,
             seed=self.cfg.seed,
+            env_kwargs=self.cfg.env.env_kwargs,
         )
         self.eval_envs = make_envs(
             env_name=self.cfg.env.env_name,
             num_envs=self.cfg.num_eval_envs,
             seed=self.cfg.seed + 10000,
+            env_kwargs=self.cfg.env.env_kwargs,
         )
-
-        # set random seeds
-        random.seed(cfg.seed)
-        np.random.seed(cfg.seed)
-        torch.manual_seed(cfg.seed)
+        log(f"Env: {self.train_envs} {self.cfg.env.env_name}", "yellow")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         log(f"using device: {self.device}")

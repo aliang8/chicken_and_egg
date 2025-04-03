@@ -1,0 +1,16 @@
+env_name: darkroom
+env_id: test
+obs_dim: 2
+act_dim: 5 # 0 no-op, 1 up, 2 right, 3 down, 4 left
+timesteps_per_trial: 10
+hp_name: darkroom
+
+env_kwargs:
+  w: 9
+  h: 9
+  num_treasures: 2
+  rand_start: true
+  hard_reward: false
+
+  minval: 0.0
+  maxval: 2.0
