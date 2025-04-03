@@ -73,7 +73,10 @@ class FETETrainer(BaseTrainer):
             # roll trial_id
             trial_ids = torch.roll(trial_ids, shifts=-1, dims=1)
             trial_ids[:, -1] = trial_id
-            infos.append(info)
+
+            timesteps = torch.cat(
+                [timesteps, torch.ones_like(timesteps)[:, :1] * (0)], dim=1
+            )[:, 1:]
 
         for ts in range(self.cfg.env.timesteps_per_trial):
             # [N, T, A], do not update the gradients for the behavior policy
@@ -124,6 +127,15 @@ class FETETrainer(BaseTrainer):
                     [observations_context, next_state.unsqueeze(1)], dim=1
                 )[:, 1:]
                 mask = torch.cat([mask, torch.ones_like(mask)[:, :1]], dim=1)[:, 1:]
+                # add the trial id to the context
+                trial_id_tensor = torch.tensor(trial_id).long()
+                trial_id_tensor = einops.repeat(
+                    trial_id_tensor, " -> b t", b=env.num_envs, t=1
+                ).to(self.device)
+                trial_ids = torch.cat([trial_ids, trial_id_tensor], dim=1)[:, 1:]
+                timesteps = torch.cat(
+                    [timesteps, torch.ones_like(timesteps)[:, :1] * (ts + 1)], dim=1
+                )[:, 1:]
 
             # apply roll here is to account for the
             # first observation which doesn't have an associated reward / action
@@ -133,17 +145,8 @@ class FETETrainer(BaseTrainer):
             actions_context[:, -2:-1] = action_t
             actions_context = torch.roll(actions_context, shifts=-1, dims=1)
 
-            timesteps = torch.cat(
-                [timesteps, torch.ones_like(timesteps)[:, :1] * (ts + 1)], dim=1
-            )[:, 1:]
             trial_return += reward
 
-            # add the trial id to the context
-            trial_id_tensor = torch.tensor(trial_id).long()
-            trial_id_tensor = einops.repeat(
-                trial_id_tensor, " -> b t", b=env.num_envs, t=1
-            ).to(self.device)
-            trial_ids = torch.cat([trial_ids, trial_id_tensor], dim=1)[:, 1:]
             infos.append(info)
 
             # assumes all envs finish at the same time
@@ -165,6 +168,7 @@ class FETETrainer(BaseTrainer):
         T = self.cfg.env.timesteps_per_trial * self.cfg.num_trials
         # add some dummy timesteps for the initial obs
         # T += self.cfg.num_trials
+        T += 1  # for padding (?)
 
         # keep track of context here for observation, reward and action
         O = self.cfg.env.obs_dim
@@ -215,9 +219,6 @@ class FETETrainer(BaseTrainer):
                     apply_meta_reset=apply_meta_reset,
                     trial_id=trial_id,
                 )
-                import ipdb
-
-                ipdb.set_trace()
                 r_exploit, l_exploit, _ = self.rollout_trial(
                     env=self.train_envs,
                     policy_type="exploit",
@@ -301,15 +302,16 @@ class FETETrainer(BaseTrainer):
             self._generate_darkroom_plots(policy_context)
 
     def _generate_darkroom_plots(self, policy_context):
-        """Generate grid-based visualization and animation of darkroom environment showing agent trajectory.
-
-        Args:
-            policy_context: Dict containing observations, rewards, etc.
-        """
+        """Generate grid-based visualization of darkroom environment showing agent trajectory."""
         try:
-            from celluloid import Camera
+            from io import BytesIO
+
+            import imageio
         except ImportError:
-            log("Please install celluloid: pip install celluloid", color="red")
+            log(
+                "Please install imageio: pip install imageio imageio-ffmpeg",
+                color="red",
+            )
             return
 
         # Extract relevant information
@@ -320,114 +322,115 @@ class FETETrainer(BaseTrainer):
 
         # Create figure for each environment
         for env_idx in range(observations.shape[0]):
-            # Get reward grid information for this environment
-            env_info = infos[env_idx]
-            if "rx" not in env_info or "ry" not in env_info or "rr" not in env_info:
+            video_start = time.time()
+            # Get first info that contains reward information
+            env_info = None
+            for info in infos:
+                if (
+                    isinstance(info, dict)
+                    and "rx" in info
+                    and "ry" in info
+                    and "rr" in info
+                ):
+                    env_info = info
+                    break
+
+            if env_info is None:
                 continue
 
-            rx = env_info["rx"]
-            ry = env_info["ry"]
-            rr = env_info["rr"]
-            w = int(env_info["w"])
-            h = int(env_info["h"])
-
-            # Create base grid with rewards
-            base_grid = np.zeros((h, w))
-            for x, y, r in zip(rx, ry, rr):
-                base_grid[y, x] = r
+            # Setup grid dimensions
+            w, h = int(env_info["w"]), int(env_info["h"])
 
             # Get agent trajectory
-            obs = observations[env_idx].cpu().numpy()  # [T, 2]
-            rewards_env = rewards[env_idx].cpu().numpy()  # [T, 1]
-            ret = np.cumsum(rewards_env)  # [T]
+            obs = observations[env_idx].cpu().numpy()
+            rewards_env = rewards[env_idx].cpu().numpy()
+            ret = np.cumsum(rewards_env, axis=0)
 
-            # Create figure and camera for animation
-            fig = plt.figure(figsize=(12, 12))
-            camera = Camera(fig)
+            # Sample frames to reduce video size
+            max_frames = 100
+            step = max(1, len(obs) // max_frames)
+            frame_indices = list(range(0, len(obs), step))
+            if len(obs) - 1 not in frame_indices:
+                frame_indices.append(len(obs) - 1)
 
-            # Create animation frames
-            for t, (x, y) in enumerate(obs):
-                x, y = int(x), int(y)
+            # Store frames for video
+            frames = []
 
-                # Create current frame's grid
-                current_grid = base_grid.copy()
+            # Generate frames
+            for t in frame_indices:
+                # Create visualization grid for this frame
+                grid = np.zeros((h, w))
 
-                # Create path mask for current timestep
-                path_mask_rgb = np.zeros((*base_grid.shape, 4))  # RGBA
+                # Add rewards to grid
+                for x, y, r in zip(env_info["rx"], env_info["ry"], env_info["rr"]):
+                    grid[y, x] = r
 
-                # Add previous path positions
-                for prev_t in range(t):
-                    prev_x, prev_y = int(obs[prev_t, 0]), int(obs[prev_t, 1])
-                    path_mask_rgb[prev_y, prev_x] = [
-                        0,
-                        0,
-                        1,
-                        0.3,
-                    ]  # Light blue for past positions
+                # Add agent's past positions (value = -0.5)
+                for past_t in range(t):
+                    x, y = obs[past_t].astype(int)
+                    if 0 <= y < h and 0 <= x < w:
+                        # Don't overwrite reward locations
+                        if grid[y, x] == 0:
+                            grid[y, x] = -0.5
 
-                # Add current position
-                path_mask_rgb[y, x] = [0, 0, 1, 1]  # Solid blue for current position
+                # Add current agent position (value = -1)
+                x, y = obs[t].astype(int)
+                if 0 <= y < h and 0 <= x < w:
+                    grid[y, x] = -1
 
-                # Mark start position
-                start_x, start_y = int(obs[0, 0]), int(obs[0, 1])
-                path_mask_rgb[start_y, start_x] = [0, 1, 0, 1]  # Solid green
+                # Add start position if not already marked (value = -0.75)
+                start_x, start_y = obs[0].astype(int)
+                if grid[start_y, start_x] == -0.5:  # Only if it's a past position
+                    grid[start_y, start_x] = -0.75
 
-                # Plot the reward grid
-                plt.imshow(current_grid, cmap="YlOrRd", interpolation="nearest")
-                plt.imshow(path_mask_rgb)
+                fig = plt.figure(figsize=(8, 8))
 
-                # Add text information
-                current_ret = ret[t] if t < len(ret) else ret[-1]
-                info_text = f"Step: {t}\n"
-                info_text += f"Return: {current_ret:.2f}\n"
-                info_text += f"Trial: {trial_ids[env_idx, t].item()}\n"
-
-                plt.text(
-                    0.02,
-                    0.98,
-                    info_text,
-                    transform=plt.gca().transAxes,
-                    verticalalignment="top",
-                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+                # Create custom colormap
+                colors = ["blue", "green", "lightblue", "white", "yellow", "red"]
+                nodes = [-1, -0.75, -0.5, 0, 0.5, 1]
+                cmap = plt.cm.colors.LinearSegmentedColormap.from_list(
+                    "custom", list(zip(np.linspace(0, 1, len(nodes)), colors))
                 )
 
-                plt.title(f"Agent Trajectory - Environment {env_idx}")
-                plt.xlabel("X Position")
-                plt.ylabel("Y Position")
+                # Plot the grid
+                plt.imshow(grid, cmap=cmap, interpolation="nearest", vmin=-1, vmax=1)
 
-                # Add colorbar for reward values
-                plt.colorbar(label="Reward Value")
+                # Add text
+                current_ret = float(ret[t, 0]) if t < len(ret) else float(ret[-1, 0])
+                current_trial = int(trial_ids[env_idx, t].cpu().item())
+                plt.title(
+                    f"Step: {t}, Return: {current_ret:.2f}, Trial: {current_trial}"
+                )
 
-                # Add custom legend
-                from matplotlib.patches import Patch
+                # Save figure to buffer
+                buf = BytesIO()
+                plt.savefig(buf, format="png", bbox_inches="tight")
+                buf.seek(0)
 
-                legend_elements = [
-                    Patch(facecolor="blue", alpha=0.3, label="Past Positions"),
-                    Patch(facecolor="blue", label="Current Position"),
-                    Patch(facecolor="green", label="Start"),
-                ]
-                plt.legend(handles=legend_elements)
+                # Read image from buffer
+                frame = imageio.imread(buf)
+                frames.append(frame)
 
-                # Capture frame
-                camera.snap()
+                # Cleanup
+                plt.close()
+                buf.close()
 
-            # Create animation
-            animation = camera.animate(interval=200)  # 200ms between frames
+            video_time = time.time() - video_start
+            log(f"Video generation time: {video_time:.2f} seconds", color="green")
 
-            # Save animation
+            # Save video
             video_path = Path(self.cfg.exp_dir) / f"rollout_{env_idx}.mp4"
-            animation.save(str(video_path), writer="ffmpeg")
-            log(f"Saved rollout animation to {video_path}", color="green")
+            try:
+                imageio.mimsave(str(video_path), frames, fps=10)
+                log(f"Saved rollout animation to {video_path}", color="green")
 
-            # Log to wandb
-            self.log_to_wandb(
-                {
-                    f"rollout_{env_idx}_video": wandb.Video(str(video_path)),
-                },
-                prefix="plots/",
-            )
-
-            plt.close()
+                # Log to wandb
+                self.log_to_wandb(
+                    {f"rollout_{env_idx}_video": wandb.Video(str(video_path))},
+                    prefix="plots/",
+                )
+            except Exception as e:
+                log(f"Failed to save video: {str(e)}", color="red")
 
     def eval(self):
         log(
@@ -462,6 +465,9 @@ class FETETrainer(BaseTrainer):
                 )
                 trial_id += 1
 
+            import ipdb
+
+            ipdb.set_trace()
             ep_return = r_explore + r_exploit
 
             # compute mean and std of episode returns over environments
