@@ -8,7 +8,7 @@ hp_name: darkroom
 env_kwargs:
   w: 9
   h: 9
-  num_treasures: 2
+  num_treasures: 8
   rand_start: true
   hard_reward: false
 

@@ -299,9 +299,70 @@ class FETETrainer(BaseTrainer):
             self.log_to_wandb({"ep_ret": wandb.Image(plt)}, prefix="plots/")
             plt.close()
         elif self.cfg.env.env_name == "darkroom":
-            self._generate_darkroom_plots(policy_context)
+            self._visualize_return(policy_context)
+            self._visualize_darkroom_traj(policy_context)
 
-    def _generate_darkroom_plots(self, policy_context):
+    def _visualize_return(self, policy_context):
+        rewards = policy_context["rewards"]  # [N, T, 1]
+        trial_ids = policy_context["trial_ids"]  # [N, T]
+
+        # For each environment
+        for env_idx in range(rewards.shape[0]):
+            # Get rewards for this environment
+            rewards_env = rewards[env_idx].cpu().numpy()
+            trial_ids_env = trial_ids[env_idx].cpu().numpy()
+
+            # Calculate cumulative return
+            ep_ret = np.cumsum(rewards_env, axis=0)
+
+            # Create figure
+            plt.figure(figsize=(12, 6))
+
+            # Adjust subplot margins to make room for title
+            plt.subplots_adjust(top=0.85)
+
+            # Plot cumulative return
+            plt.plot(ep_ret, "b-", label="Cumulative Return")
+
+            # Add vertical line after explore is over
+            plt.axvline(
+                x=self.cfg.num_eval_explore_trials * self.cfg.env.timesteps_per_trial,
+                color="k",
+                linestyle="--",
+            )
+
+            # Add vertical lines at trial boundaries
+            unique_trials = np.unique(trial_ids_env)
+            for trial_id in unique_trials[1:]:  # Skip first boundary
+                # Find first occurrence of this trial_id
+                trial_boundary = np.where(trial_ids_env == trial_id)[0][0]
+                plt.axvline(x=trial_boundary, color="r", linestyle="--", alpha=0.5)
+                # Add trial number
+                plt.text(
+                    trial_boundary,
+                    plt.ylim()[1],
+                    f"Trial {trial_id}",
+                    rotation=0,
+                    ha="right",
+                    va="bottom",
+                )
+
+            # Use suptitle instead of title to place it higher
+            plt.suptitle(f"Cumulative Return Over Time - Environment {env_idx}", y=0.95)
+            plt.xlabel("Steps")
+            plt.ylabel("Cumulative Return")
+            plt.grid(True, alpha=0.3)
+
+            # Save plot
+            plot_path = Path(self.cfg.exp_dir) / f"ep_ret_{env_idx}.png"
+            plt.savefig(plot_path, bbox_inches="tight")
+            log(f"Saved return plot to {plot_path}", color="green")
+
+            # Log to wandb
+            self.log_to_wandb({f"ep_ret_{env_idx}": wandb.Image(plt)}, prefix="ep_ret/")
+            plt.close()
+
+    def _visualize_darkroom_traj(self, policy_context):
         """Generate grid-based visualization of darkroom environment showing agent trajectory."""
         try:
             from io import BytesIO
@@ -439,7 +500,7 @@ class FETETrainer(BaseTrainer):
         )
         self.model.eval()
 
-        num_explore = 1
+        num_explore = self.cfg.num_eval_explore_trials
         num_exploit = self.cfg.num_trials - num_explore
 
         policy_context = self._init_context(batch_size=self.cfg.num_eval_envs)
