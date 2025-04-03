@@ -213,6 +213,9 @@ class FETETrainer(BaseTrainer):
 
         update_time = time.time()
         total_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
+        explore_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
+        exploit_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
+
         # best_r = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
         best_r = torch.tensor(-float("inf")).to(self.device)
 
@@ -246,6 +249,7 @@ class FETETrainer(BaseTrainer):
                 # train the explot policy here
                 mask = r_exploit >= best_r
                 total_loss += l_exploit * mask
+                exploit_loss += l_exploit * mask
 
                 # explore trial is 'maximal'
                 # good explore trials are followed by the exploit policy achieving
@@ -253,6 +257,7 @@ class FETETrainer(BaseTrainer):
                 # train the explore policy here
                 mask2 = r_exploit > best_r
                 total_loss += l_explore * mask2
+                explore_loss += l_explore * mask2
                 # best_r = r_exploit * mask + best_r * (1 - mask2.int())
 
                 # select the best reward from all the exploit trials across environments
@@ -269,6 +274,8 @@ class FETETrainer(BaseTrainer):
 
         # average loss over number of environments
         total_loss = total_loss.mean()
+        explore_loss = explore_loss.mean()
+        exploit_loss = exploit_loss.mean()
         self.scaler.scale(total_loss).backward()
         # Unscale gradients to prepare for gradient clipping
         self.scaler.unscale_(self.optimizer)
@@ -286,6 +293,8 @@ class FETETrainer(BaseTrainer):
 
         train_metrics = {
             "loss": total_loss.item(),
+            "explore_loss": explore_loss.item(),
+            "exploit_loss": exploit_loss.item(),
             **metrics,
         }
 
