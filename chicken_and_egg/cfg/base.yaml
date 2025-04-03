@@ -32,6 +32,8 @@ skip_first_eval: False
 num_epochs: 100
 num_train_envs: 1
 num_eval_envs: 1
+
+num_eval_rollouts_save: 3
 num_trials: 5
 num_eval_explore_trials: 1
 debug: False

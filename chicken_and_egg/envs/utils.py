@@ -20,6 +20,7 @@ def make_envs(env_name: str, num_envs: int, seed: int, env_kwargs: Dict = None):
             raise ValueError(f"Unknown environment: {env_name}")
 
         env = env_cls(**env_kwargs)
+        env.reset(seed=seed + env_idx)
         return env
 
     envs = [partial(env_fn, env_idx=i) for i in range(num_envs)]

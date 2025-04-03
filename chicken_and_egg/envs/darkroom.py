@@ -19,12 +19,8 @@ class DarkRoom(gym.Env):
         self.w = w
         self.h = h
         self.num_treasures = num_treasures
-
-        # these are the positions of the treasures and traps
-        self.rx = np.random.randint(0, w, (num_treasures,))
-        self.ry = np.random.randint(0, h, (num_treasures,))
-        # these are the rewards for the treasures and traps
-        self.rr = np.random.uniform(minval, maxval, (num_treasures,))
+        self.minval = minval
+        self.maxval = maxval
 
         self.current_state = None
         # this keeps track of which traps and rewards have been visited
@@ -68,6 +64,12 @@ class DarkRoom(gym.Env):
             ax = self.w // 2
             ay = self.h // 2
 
+        # these are the positions of the treasures and traps
+        self.rx = np.random.randint(0, self.w, (self.num_treasures,))
+        self.ry = np.random.randint(0, self.h, (self.num_treasures,))
+        # these are the rewards for the treasures and traps
+        self.rr = np.random.uniform(self.minval, self.maxval, (self.num_treasures,))
+
         self.current_state = (ax, ay)
 
         return self.get_obs(ax, ay), self.get_info()
@@ -79,6 +81,7 @@ class DarkRoom(gym.Env):
             "rr": self.rr,
             "w": self.w,
             "h": self.h,
+            "visited": self.visited,
         }
 
     def get_obs(self, ax, ay):

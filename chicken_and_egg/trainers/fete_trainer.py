@@ -307,7 +307,8 @@ class FETETrainer(BaseTrainer):
         trial_ids = policy_context["trial_ids"]  # [N, T]
 
         # For each environment
-        for env_idx in range(rewards.shape[0]):
+        num_save = min(self.cfg.num_eval_rollouts_save, rewards.shape[0])
+        for env_idx in range(num_save):
             # Get rewards for this environment
             rewards_env = rewards[env_idx].cpu().numpy()
             trial_ids_env = trial_ids[env_idx].cpu().numpy()
@@ -341,20 +342,21 @@ class FETETrainer(BaseTrainer):
                 plt.text(
                     trial_boundary,
                     plt.ylim()[1],
-                    f"Trial {trial_id}",
+                    f"T{trial_id}",
                     rotation=0,
                     ha="right",
                     va="bottom",
                 )
 
             # Use suptitle instead of title to place it higher
-            plt.suptitle(f"Cumulative Return Over Time - Environment {env_idx}", y=0.95)
+            plt.suptitle(f"Cumulative Reward - Env {env_idx}", y=0.95)
             plt.xlabel("Steps")
             plt.ylabel("Cumulative Return")
             plt.grid(True, alpha=0.3)
 
             # Save plot
-            plot_path = Path(self.cfg.exp_dir) / f"ep_ret_{env_idx}.png"
+            plot_path = Path(self.cfg.exp_dir) / "ep_ret" / f"ep_ret_{env_idx}.png"
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(plot_path, bbox_inches="tight")
             log(f"Saved return plot to {plot_path}", color="green")
 
@@ -382,7 +384,9 @@ class FETETrainer(BaseTrainer):
         infos = policy_context["infos"]  # List of dicts
 
         # Create figure for each environment
-        for env_idx in range(observations.shape[0]):
+        num_save = min(self.cfg.num_eval_rollouts_save, rewards.shape[0])
+
+        for env_idx in range(num_save):
             video_start = time.time()
             # Get first info that contains reward information
             env_info = None
@@ -400,7 +404,7 @@ class FETETrainer(BaseTrainer):
                 continue
 
             # Setup grid dimensions
-            w, h = int(env_info["w"]), int(env_info["h"])
+            w, h = int(env_info["w"][env_idx]), int(env_info["h"][env_idx])
 
             # Get agent trajectory
             obs = observations[env_idx].cpu().numpy()
@@ -480,14 +484,17 @@ class FETETrainer(BaseTrainer):
             log(f"Video generation time: {video_time:.2f} seconds", color="green")
 
             # Save video
-            video_path = Path(self.cfg.exp_dir) / f"rollout_{env_idx}.mp4"
+            video_path = (
+                Path(self.cfg.exp_dir) / "eval_rollouts" / f"rollout_{env_idx}.mp4"
+            )
+            video_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 imageio.mimsave(str(video_path), frames, fps=10)
                 log(f"Saved rollout animation to {video_path}", color="green")
 
                 # Log to wandb
                 self.log_to_wandb(
-                    {f"rollout_{env_idx}_video": wandb.Video(str(video_path))},
+                    {f"rollout_{env_idx}": wandb.Video(str(video_path))},
                     prefix="plots/",
                 )
             except Exception as e:
@@ -526,9 +533,6 @@ class FETETrainer(BaseTrainer):
                 )
                 trial_id += 1
 
-            import ipdb
-
-            ipdb.set_trace()
             ep_return = r_explore + r_exploit
 
             # compute mean and std of episode returns over environments
