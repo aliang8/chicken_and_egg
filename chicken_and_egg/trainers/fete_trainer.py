@@ -32,8 +32,8 @@ class FETETrainer(BaseTrainer):
         env: gym.Env,
         policy_type: str,
         context: Dict[str, torch.Tensor] = None,
-        apply_meta_reset: bool = True,
         trial_id: int = None,
+        sample_actions: bool = True,
     ):
         """
         Rollout a trial for the GPT-2 based transformer policy.
@@ -55,29 +55,28 @@ class FETETrainer(BaseTrainer):
         trial_ids = context["trial_ids"]
         infos = context["infos"]
 
-        if apply_meta_reset:
-            obs, info = env.reset()
-            obs = torch.from_numpy(obs).to(self.device)
+        obs, info = env.reset(options={"reset_task": False})
+        obs = torch.from_numpy(obs).to(self.device)
 
-            # add the new observations to the context
-            observations_context = torch.roll(observations_context, shifts=-1, dims=1)
-            observations_context[:, -1] = obs
-            # roll mask
-            mask = torch.roll(mask, shifts=-1, dims=1)
-            mask[:, -1] = 1
-            # set the last mask to 1
+        # add the new observations to the context
+        observations_context = torch.roll(observations_context, shifts=-1, dims=1)
+        observations_context[:, -1] = obs
+        # roll mask
+        mask = torch.roll(mask, shifts=-1, dims=1)
+        mask[:, -1] = 1
+        # set the last mask to 1
 
-            # roll trial_id
-            trial_ids = torch.roll(trial_ids, shifts=-1, dims=1)
-            trial_ids[:, -1] = trial_id
+        # roll trial_id
+        trial_ids = torch.roll(trial_ids, shifts=-1, dims=1)
+        trial_ids[:, -1] = trial_id
 
-            timesteps = torch.roll(timesteps, shifts=-1, dims=1)
-            timesteps[:, -1] = 0
+        timesteps = torch.roll(timesteps, shifts=-1, dims=1)
+        timesteps[:, -1] = 0
 
-            # roll rewards and actions
-            rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
-            actions_context = torch.roll(actions_context, shifts=-1, dims=1)
-            infos.append(info)
+        # roll rewards and actions
+        rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
+        actions_context = torch.roll(actions_context, shifts=-1, dims=1)
+        infos.append(info)
 
         for ts in range(self.cfg.env.timesteps_per_trial):
             # [N, T, A], do not update the gradients for the behavior policy
@@ -105,12 +104,16 @@ class FETETrainer(BaseTrainer):
             # compute hadamard product of logits
             logits = behavior_logits * successor_logits
 
-            # sample action from logits
-            action = torch.argmax(logits, dim=-1)
-
             # compute loss for current timestep
             logits_t = logits[:, -1]
-            action_t = action[:, -1]
+            # apply softmax to get a valid distribution
+            logits_softmaxed = F.softmax(logits_t, dim=-1)
+
+            if sample_actions:
+                # treat as weights
+                action_t = torch.multinomial(logits_softmaxed, num_samples=1).squeeze()
+            else:
+                action_t = torch.argmax(logits_t, dim=-1)
 
             # cross entropy loss
             action_loss += F.cross_entropy(logits_t, action_t, reduction="mean")
@@ -216,37 +219,38 @@ class FETETrainer(BaseTrainer):
         # this is a single rollout of the policy
         # rollout N trials
         with torch.amp.autocast("cuda"):
-            policy_context = self._init_context()
+            policy_context = self._init_context(self.cfg.num_train_envs)
             for trial_id in range(self.cfg.num_trials):
-                if trial_id == 0:
-                    apply_meta_reset = True
-                else:
-                    apply_meta_reset = False
-
+                # run one trial of explore policy
+                # and add this to the context for the exploit policy
                 r_explore, l_explore, policy_context = self.rollout_trial(
                     env=self.train_envs,
                     policy_type="explore",
                     context=policy_context,
-                    apply_meta_reset=apply_meta_reset,
                     trial_id=trial_id,
+                    sample_actions=True,
                 )
+                # run one trial of exploit policy which is used as feedback
+                # to train the explore policy
                 r_exploit, l_exploit, _ = self.rollout_trial(
                     env=self.train_envs,
                     policy_type="exploit",
                     context=policy_context,
-                    apply_meta_reset=apply_meta_reset,
-                    trial_id=trial_id,
+                    trial_id=trial_id + 1,
+                    sample_actions=True,
                 )
 
                 # exploit trial is 'informative'
                 # good exploit trials meet or surpass previous exploit returns in the
                 # meta-rollout sequence
+                # train the explot policy here
                 mask = r_exploit >= best_r
                 total_loss += l_exploit * mask
 
                 # explore trial is 'maximal'
                 # good explore trials are followed by the exploit policy achieving
                 # higher trial returns than those seen so far
+                # train the explore policy here
                 mask2 = r_exploit > best_r
                 total_loss += l_explore * mask2
                 # best_r = r_exploit * mask + best_r * (1 - mask2.int())
@@ -254,6 +258,8 @@ class FETETrainer(BaseTrainer):
                 # select the best reward from all the exploit trials across environments
                 r_exploit_ = r_exploit[mask2]
                 # handle max of empty tensor
+
+                # update the baseline return
                 if r_exploit_.numel() > 0:
                     best_r = r_exploit_.max()
                 else:
@@ -584,8 +590,8 @@ class FETETrainer(BaseTrainer):
                     env=self.eval_envs,
                     policy_type="explore",
                     context=policy_context,
-                    apply_meta_reset=True,
                     trial_id=trial_id,
+                    sample_actions=False,
                 )
                 trial_id += 1
 
@@ -594,8 +600,8 @@ class FETETrainer(BaseTrainer):
                     env=self.eval_envs,
                     policy_type="exploit",
                     context=policy_context,
-                    apply_meta_reset=True,
                     trial_id=trial_id,
+                    sample_actions=False,
                 )
                 trial_id += 1
 

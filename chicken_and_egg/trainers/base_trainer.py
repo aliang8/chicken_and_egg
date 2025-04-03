@@ -180,12 +180,16 @@ class BaseTrainer:
             "yellow",
         )
 
-        # make this a sequential LR scheduler with warmstarts
+        # Calculate warmup steps as a fraction of total updates
+        num_warmup_steps = int(self.cfg.optimizer.warmup_fraction * self.cfg.num_epochs)
+        log(f"Number of warmup steps for model: {num_warmup_steps}", "yellow")
+
+        # Linear warmup scheduler
         warmstart_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
             start_factor=0.001,
             end_factor=1.0,
-            total_iters=self.cfg.optimizer.num_warmup_steps,
+            total_iters=num_warmup_steps,
         )
 
         scheduler = scheduler_cls(optimizer, **self.cfg.lr_scheduler.params)
@@ -193,7 +197,7 @@ class BaseTrainer:
         scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer,
             [warmstart_scheduler, scheduler],
-            milestones=[self.cfg.optimizer.num_warmup_steps],
+            milestones=[num_warmup_steps],
         )
         return optimizer, scheduler
 

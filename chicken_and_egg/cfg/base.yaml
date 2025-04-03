@@ -12,12 +12,18 @@ optimizer:
     eps: 1e-5
     weight_decay: 0.001
     betas: [0.9, 0.999]
-  num_warmup_steps: 5 # this is per epoch
+  warmup_fraction: 0.1 # this is per epoch
+
+# lr_scheduler:
+#   name: 'ConstantLR'
+#   params:
+#     factor: 1
 
 lr_scheduler:
-  name: 'ConstantLR'
+  name: 'CosineAnnealingLR'
   params:
-    factor: 1
+    T_max: ${num_epochs}
+    eta_min: 3e-5
 
 # wandb configurations
 use_wandb: False

@@ -9,7 +9,7 @@ env_kwargs:
   w: 9
   h: 9
   num_treasures: 8
-  rand_start: true
+  rand_start: false
   hard_reward: false
 
   minval: 0.0

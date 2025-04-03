@@ -82,7 +82,7 @@ class FETEPolicy(BaseModel):
         self.embed_reward = nn.Linear(1, cfg.hidden_dim)
         self.embed_action = nn.Linear(1, cfg.hidden_dim)
         self.embed_observation = nn.Linear(cfg.obs_dim, cfg.hidden_dim)
-        self.embed_trial_id = nn.Embedding(cfg.num_trials, cfg.hidden_dim)
+        self.embed_trial_id = nn.Embedding(cfg.num_trials + 1, cfg.hidden_dim)
 
         # GPT-style transformer model
         self.transformer = TransformerModel(cfg)
