@@ -22,9 +22,12 @@ class DarkRoom(gym.Env):
         self.minval = minval
         self.maxval = maxval
 
-        self.current_state = None
+        self.current_state = None  # Will store (x, y)
         # this keeps track of which traps and rewards have been visited
-        self.visited = np.zeros((num_treasures,))
+        self.visited = None
+        self.rx = None
+        self.ry = None
+        self.rr = None
 
     @property
     def action_space(self):
@@ -41,19 +44,29 @@ class DarkRoom(gym.Env):
         # 0 no-op
         # 1 up, 2 right, 3 down, 4 left
         curr_x, curr_y = self.current_state
+        # Fix action effects to match coordinate system:
+        # up (1) decreases y, down (3) increases y
+        # right (2) increases x, left (4) decreases x
         ax = np.clip(curr_x + (action == 2) - (action == 4), 0, self.w - 1)
-        ay = np.clip(curr_y + (action == 1) - (action == 3), 0, self.h - 1)
+        ay = np.clip(
+            curr_y - (action == 1) + (action == 3), 0, self.h - 1
+        )  # Changed signs here
 
-        # check if the agent has visited the treasure or trap
-        visited = (ax == self.rx) & (ay == self.ry)
-        # reward is the sum of the rewards for the treasures and traps
+        # check if the agent has visited any unvisited treasure/trap
+        unvisited_mask = ~self.visited  # Only consider unvisited treasures/traps
+        visited = (ax == self.rx) & (ay == self.ry) & unvisited_mask
+
+        # Update visited status
+        self.visited = self.visited | visited
+
+        # reward is the sum of the rewards for newly visited treasures/traps only
         reward = np.sum(self.rr[visited])
 
         obs = self.get_obs(ax, ay)
-        self.current_state = (ax, ay)
-        return (obs, reward, False, False, self.get_info())
+        self.current_state = (ax, ay)  # Store as (x, y)
+        return obs, reward, False, False, self.get_info()
 
-    def reset(self, seed: int = None, **kwargs):
+    def reset(self, seed: int = None, reset_task: bool = False, **kwargs):
         if seed is not None:
             np.random.seed(seed)
 
@@ -64,14 +77,16 @@ class DarkRoom(gym.Env):
             ax = self.w // 2
             ay = self.h // 2
 
-        # these are the positions of the treasures and traps
-        self.rx = np.random.randint(0, self.w, (self.num_treasures,))
-        self.ry = np.random.randint(0, self.h, (self.num_treasures,))
-        # these are the rewards for the treasures and traps
-        self.rr = np.random.uniform(self.minval, self.maxval, (self.num_treasures,))
+        # Reset visited status
+        self.visited = np.zeros((self.num_treasures,), dtype=bool)
 
-        self.current_state = (ax, ay)
+        # reset the task to a new random location
+        if reset_task or self.rx is None:
+            self.rx = np.random.randint(0, self.w, (self.num_treasures,))
+            self.ry = np.random.randint(0, self.h, (self.num_treasures,))
+            self.rr = np.random.uniform(self.minval, self.maxval, (self.num_treasures,))
 
+        self.current_state = (ax, ay)  # Store as (x, y)
         return self.get_obs(ax, ay), self.get_info()
 
     def get_info(self):
@@ -85,4 +100,4 @@ class DarkRoom(gym.Env):
         }
 
     def get_obs(self, ax, ay):
-        return np.array([ax, ay])
+        return np.array([ax, ay])  # Return as [x, y]

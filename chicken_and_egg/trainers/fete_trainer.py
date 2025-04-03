@@ -57,26 +57,27 @@ class FETETrainer(BaseTrainer):
 
         if apply_meta_reset:
             obs, info = env.reset()
-            obs = torch.from_numpy(obs).to(self.device).unsqueeze(1)
+            obs = torch.from_numpy(obs).to(self.device)
 
             # add the new observations to the context
-            observations_context = torch.cat([observations_context, obs], dim=1)[:, 1:]
-
+            observations_context = torch.roll(observations_context, shifts=-1, dims=1)
+            observations_context[:, -1] = obs
             # roll mask
             mask = torch.roll(mask, shifts=-1, dims=1)
-            # roll all of the others
-            actions_context = torch.roll(actions_context, shifts=-1, dims=1)
-            rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
-            # set the last mask to 1
             mask[:, -1] = 1
+            # set the last mask to 1
 
             # roll trial_id
             trial_ids = torch.roll(trial_ids, shifts=-1, dims=1)
             trial_ids[:, -1] = trial_id
 
-            timesteps = torch.cat(
-                [timesteps, torch.ones_like(timesteps)[:, :1] * (0)], dim=1
-            )[:, 1:]
+            timesteps = torch.roll(timesteps, shifts=-1, dims=1)
+            timesteps[:, -1] = 0
+
+            # roll rewards and actions
+            rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
+            actions_context = torch.roll(actions_context, shifts=-1, dims=1)
+            infos.append(info)
 
         for ts in range(self.cfg.env.timesteps_per_trial):
             # [N, T, A], do not update the gradients for the behavior policy
@@ -117,37 +118,44 @@ class FETETrainer(BaseTrainer):
             next_state, reward, done, terminal, info = env.step(to_numpy(action_t))
 
             next_state = torch.from_numpy(next_state).to(self.device)
-            action_t = action_t.float()
+            action_t = action_t.float().detach()
+            action_t = einops.repeat(action_t, "b -> b t", t=1)
+
             reward = torch.from_numpy(reward).to(self.device).unsqueeze(-1).float()
 
             # update context by appending new state, reward and action
+
             # if its the last timestep, don't append the next state
             if ts < self.cfg.env.timesteps_per_trial - 1:
-                observations_context = torch.cat(
-                    [observations_context, next_state.unsqueeze(1)], dim=1
-                )[:, 1:]
-                mask = torch.cat([mask, torch.ones_like(mask)[:, :1]], dim=1)[:, 1:]
+                observations_context = torch.roll(
+                    observations_context, shifts=-1, dims=1
+                )
+                observations_context[:, -1] = next_state
+                mask = torch.roll(mask, shifts=-1, dims=1)
+                mask[:, -1] = 1
+
                 # add the trial id to the context
                 trial_id_tensor = torch.tensor(trial_id).long()
                 trial_id_tensor = einops.repeat(
-                    trial_id_tensor, " -> b t", b=env.num_envs, t=1
+                    trial_id_tensor, " -> b", b=env.num_envs
                 ).to(self.device)
-                trial_ids = torch.cat([trial_ids, trial_id_tensor], dim=1)[:, 1:]
-                timesteps = torch.cat(
-                    [timesteps, torch.ones_like(timesteps)[:, :1] * (ts + 1)], dim=1
-                )[:, 1:]
-
-            # apply roll here is to account for the
-            # first observation which doesn't have an associated reward / action
-            rewards_context[:, -1] = reward
-            rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
-            action_t = einops.repeat(action_t, "b -> b t a", t=1, a=1).detach()
-            actions_context[:, -2:-1] = action_t
-            actions_context = torch.roll(actions_context, shifts=-1, dims=1)
+                trial_ids = torch.roll(trial_ids, shifts=-1, dims=1)
+                trial_ids[:, -1] = trial_id_tensor
+                timesteps = torch.roll(timesteps, shifts=-1, dims=1)
+                timesteps[:, -1] = ts + 1
+                infos.append(info)
+                # apply roll here is to account for the
+                # first observation which doesn't have an associated reward / action
+                rewards_context[:, -1] = reward
+                rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
+                actions_context[:, -1] = action_t
+                actions_context = torch.roll(actions_context, shifts=-1, dims=1)
+            else:
+                # just insert action and reward
+                rewards_context[:, -1] = reward
+                actions_context[:, -1] = action_t
 
             trial_return += reward
-
-            infos.append(info)
 
             # assumes all envs finish at the same time
             if done.all():
@@ -162,13 +170,16 @@ class FETETrainer(BaseTrainer):
             "trial_ids": trial_ids,
             "infos": infos,
         }
+
+        # average loss across the environments
+        action_loss /= env.num_envs
         return trial_return, action_loss, new_context
 
     def _init_context(self, batch_size: int = 1):
         T = self.cfg.env.timesteps_per_trial * self.cfg.num_trials
         # add some dummy timesteps for the initial obs
         # T += self.cfg.num_trials
-        T += 1  # for padding (?)
+        # T += 1  # for padding (?)
 
         # keep track of context here for observation, reward and action
         O = self.cfg.env.obs_dim
@@ -381,9 +392,11 @@ class FETETrainer(BaseTrainer):
         observations = policy_context["observations"]  # [N, T, 2]
         rewards = policy_context["rewards"]  # [N, T, 1]
         trial_ids = policy_context["trial_ids"]  # [N, T]
+        actions = policy_context["actions"]  # [N, T, 1]
         infos = policy_context["infos"]  # List of dicts
 
-        # Create figure for each environment
+        ACTION_MAP = {0: "No-op", 1: "Up", 2: "Right", 3: "Down", 4: "Left"}
+
         num_save = min(self.cfg.num_eval_rollouts_save, rewards.shape[0])
 
         for env_idx in range(num_save):
@@ -406,65 +419,117 @@ class FETETrainer(BaseTrainer):
             # Setup grid dimensions
             w, h = int(env_info["w"][env_idx]), int(env_info["h"][env_idx])
 
+            rr = env_info["rr"][env_idx]
+
             # Get agent trajectory
-            obs = observations[env_idx].cpu().numpy()
+            obs = observations[env_idx].cpu().numpy()  # obs comes as [x, y]
             rewards_env = rewards[env_idx].cpu().numpy()
             ret = np.cumsum(rewards_env, axis=0)
 
-            # Sample frames to reduce video size
+            # Sample frames
             max_frames = 100
             step = max(1, len(obs) // max_frames)
             frame_indices = list(range(0, len(obs), step))
             if len(obs) - 1 not in frame_indices:
                 frame_indices.append(len(obs) - 1)
 
-            # Store frames for video
             frames = []
 
             # Generate frames
             for t in frame_indices:
                 # Create visualization grid for this frame
-                grid = np.zeros((h, w))
+                grid = np.zeros((h, w))  # Use (h, w) for matrix indexing
+                visited_grid = np.zeros((h, w))
+                visited = infos[t]["visited"][env_idx]
 
-                # Add rewards to grid
-                for x, y, r in zip(env_info["rx"], env_info["ry"], env_info["rr"]):
-                    grid[y, x] = r
+                # Add rewards to grid, distinguishing between visited and unvisited
+                for i, (x, y, r) in enumerate(
+                    zip(
+                        env_info["rx"][env_idx],
+                        env_info["ry"][env_idx],
+                        env_info["rr"][env_idx],
+                    )
+                ):
+                    if visited[i]:
+                        visited_grid[y, x] = r  # Use [y, x] for matrix indexing
+                    else:
+                        grid[y, x] = r  # Use [y, x] for matrix indexing
 
                 # Add agent's past positions (value = -0.5)
                 for past_t in range(t):
-                    x, y = obs[past_t].astype(int)
-                    if 0 <= y < h and 0 <= x < w:
-                        # Don't overwrite reward locations
-                        if grid[y, x] == 0:
-                            grid[y, x] = -0.5
+                    x, y = obs[past_t].astype(int)  # obs comes as [x, y]
+                    if 0 <= x < w and 0 <= y < h:
+                        if grid[y, x] == 0 and visited_grid[y, x] == 0:  # Use [y, x]
+                            grid[y, x] = -0.5  # Use [y, x]
 
                 # Add current agent position (value = -1)
                 x, y = obs[t].astype(int)
-                if 0 <= y < h and 0 <= x < w:
-                    grid[y, x] = -1
+                if 0 <= x < w and 0 <= y < h:
+                    grid[y, x] = -1  # Use [y, x]
 
                 # Add start position if not already marked (value = -0.75)
                 start_x, start_y = obs[0].astype(int)
-                if grid[start_y, start_x] == -0.5:  # Only if it's a past position
-                    grid[start_y, start_x] = -0.75
+                if grid[start_y, start_x] == -0.5:  # Use [y, x]
+                    grid[start_y, start_x] = -0.75  # Use [y, x]
 
                 fig = plt.figure(figsize=(8, 8))
 
-                # Create custom colormap
+                # Create custom colormap for unvisited treasures and agent
                 colors = ["blue", "green", "lightblue", "white", "yellow", "red"]
                 nodes = [-1, -0.75, -0.5, 0, 0.5, 1]
                 cmap = plt.cm.colors.LinearSegmentedColormap.from_list(
                     "custom", list(zip(np.linspace(0, 1, len(nodes)), colors))
                 )
 
-                # Plot the grid
-                plt.imshow(grid, cmap=cmap, interpolation="nearest", vmin=-1, vmax=1)
+                # Plot the base grid
+                plt.imshow(
+                    grid,
+                    cmap=cmap,
+                    interpolation="nearest",
+                    vmin=-1,
+                    vmax=1,
+                    origin="upper",
+                )
+
+                # Overlay visited treasures
+                visited_mask = visited_grid != 0
+                if visited_mask.any():
+                    plt.imshow(
+                        np.ma.masked_where(~visited_mask, visited_grid),
+                        cmap=plt.cm.Greys,
+                        interpolation="nearest",
+                        alpha=0.7,
+                        vmin=-1,
+                        vmax=1,
+                        origin="upper",
+                    )
+
+                # Add reward values as text for all treasures (both visited and unvisited)
+                for i, (rx, ry, rr) in enumerate(
+                    zip(
+                        env_info["rx"][env_idx],
+                        env_info["ry"][env_idx],
+                        env_info["rr"][env_idx],
+                    )
+                ):
+                    plt.text(
+                        rx,
+                        ry - 0.2,  # Slightly above the cell
+                        f"{rr:.2f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                        color="black",
+                        bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
+                    )
 
                 # Add text
                 current_ret = float(ret[t, 0]) if t < len(ret) else float(ret[-1, 0])
                 current_trial = int(trial_ids[env_idx, t].cpu().item())
+                action = int(actions[env_idx, t].cpu().item())
                 plt.title(
-                    f"Step: {t}, Return: {current_ret:.2f}, Trial: {current_trial}"
+                    f"Step: {t}, Return: {current_ret:.2f}, Trial: {current_trial}\n"
+                    f"Action: {ACTION_MAP[action]} ({action}), Pos: ({x}, {y})"
                 )
 
                 # Save figure to buffer
@@ -489,7 +554,7 @@ class FETETrainer(BaseTrainer):
             )
             video_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                imageio.mimsave(str(video_path), frames, fps=10)
+                imageio.mimsave(str(video_path), frames, fps=1)
                 log(f"Saved rollout animation to {video_path}", color="green")
 
                 # Log to wandb
@@ -523,6 +588,7 @@ class FETETrainer(BaseTrainer):
                     trial_id=trial_id,
                 )
                 trial_id += 1
+
             for _ in range(num_exploit):
                 r_exploit, _, policy_context = self.rollout_trial(
                     env=self.eval_envs,
