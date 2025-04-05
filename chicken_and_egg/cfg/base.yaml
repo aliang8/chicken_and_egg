@@ -30,18 +30,18 @@ use_wandb: False
 clip_grad_norm: 1.0
 
 # training
-eval_every: 5 # in terms of epochs
+eval_every: 100 # in terms of epochs
 load_from_ckpt: False
 exp_dir: ""
 mode: train
 skip_first_eval: False
-num_epochs: 100
-num_train_envs: 1
-num_eval_envs: 1
+num_epochs: 10_000
+num_train_envs: 20
+num_eval_envs: 5
 
-num_eval_rollouts_save: 3
-num_trials: 5
-num_eval_explore_trials: 1
+num_eval_rollouts_save: 2
+num_trials: 1
+num_eval_explore_trials: 3
 debug: False
 
 hp_name: null # TODO: fill this in

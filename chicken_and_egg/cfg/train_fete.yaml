@@ -1,8 +1,8 @@
 name: fete 
 hp_name: ${name}-${env.hp_name}_s-${seed}
 
-update_behavior_every: 1
-num_trials: 5
+update_behavior_every: 10
+num_trials: ${env.num_trials}
 
 defaults:
   - base

@@ -3,6 +3,7 @@ env_id: test
 obs_dim: 2
 act_dim: 5 # 0 no-op, 1 up, 2 right, 3 down, 4 left
 timesteps_per_trial: 10
+num_trials: 6
 hp_name: darkroom
 
 env_kwargs:

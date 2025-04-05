@@ -27,13 +27,19 @@ wandb:
   project: `your_wandb_project`
 ```
 
-## Running FETE training
+## Training
 
 To run the training script, use the following command:
 
 ```bash
+# DREAM
+python main.py --config-name=train_dream \
+  env=darkroom \
+  run_id=0000
+
+# FETE
 python main.py --config-name=train_fete \
-  env=bandit \
+  env=darkroom \
   run_id=0000
 ```
 

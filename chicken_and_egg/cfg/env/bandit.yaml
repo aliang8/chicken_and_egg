@@ -3,6 +3,7 @@ env_id: test
 obs_dim: 10
 act_dim: 10
 timesteps_per_trial: 1
+num_trials: 10
 bandit_type: reg
 hp_name: bt-${env.bandit_type}
 

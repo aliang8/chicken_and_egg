@@ -1,0 +1,12 @@
+# Base model settings
+hidden_dim: 64
+max_seq_len: 50
+dropout: 0.1
+
+# Environment dimensions
+kwargs:
+  obs_dim: ${env.obs_dim}
+  act_dim: ${env.act_dim} 
+  hidden_dim: ${model.hidden_dim}
+  epsilon: 1.0
+  test_epsilon: 0.0

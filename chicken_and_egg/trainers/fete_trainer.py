@@ -208,6 +208,12 @@ class FETETrainer(BaseTrainer):
         return context
 
     def train_step(self):
+        """
+        Runs a single training step. This is a single rollout (episode) of the policy which consists of
+        1 trials followed by 1 exploit trial.
+
+        Only the explore trial is added as context.
+        """
         self.model.train()
         self.optimizer.zero_grad()
 
@@ -217,7 +223,9 @@ class FETETrainer(BaseTrainer):
         exploit_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
 
         # best_r = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
-        best_r = torch.tensor(-float("inf")).to(self.device)
+
+        # reset best_r every epoch
+        self.best_r = torch.tensor(0.0).to(self.device)
 
         # this is a single rollout of the policy
         # rollout N trials
@@ -247,7 +255,7 @@ class FETETrainer(BaseTrainer):
                 # good exploit trials meet or surpass previous exploit returns in the
                 # meta-rollout sequence
                 # train the explot policy here
-                mask = r_exploit >= best_r
+                mask = r_exploit >= self.best_r
                 total_loss += l_exploit * mask
                 exploit_loss += l_exploit * mask
 
@@ -255,7 +263,7 @@ class FETETrainer(BaseTrainer):
                 # good explore trials are followed by the exploit policy achieving
                 # higher trial returns than those seen so far
                 # train the explore policy here
-                mask2 = r_exploit > best_r
+                mask2 = r_exploit > self.best_r
                 total_loss += l_explore * mask2
                 explore_loss += l_explore * mask2
                 # best_r = r_exploit * mask + best_r * (1 - mask2.int())
@@ -266,9 +274,9 @@ class FETETrainer(BaseTrainer):
 
                 # update the baseline return
                 if r_exploit_.numel() > 0:
-                    best_r = r_exploit_.max()
+                    self.best_r = r_exploit_.max()
                 else:
-                    best_r = best_r
+                    self.best_r = self.best_r
 
                 # log(f"Epoch: {self.current_epoch}, Best R: {best_r}")
 
@@ -295,6 +303,7 @@ class FETETrainer(BaseTrainer):
             "loss": total_loss.item(),
             "explore_loss": explore_loss.item(),
             "exploit_loss": exploit_loss.item(),
+            "best_r": self.best_r.item(),
             **metrics,
         }
 
