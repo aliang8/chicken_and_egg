@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from omegaconf import DictConfig
 from torch import nn
+from torch.nn import functional as F
 
 from chicken_and_egg.utils.data_utils import Transition
 
@@ -18,29 +19,45 @@ class DREAM(nn.Module):
         super().__init__()
         self.cfg = cfg
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.exploit_policy = DQNAgent(self.cfg.kwargs, device)
-        self.exploration_policy = DQNAgent(self.cfg.kwargs, device)
+        self.exploit_policy = DQNAgent(self.cfg, device)
+        self.exploration_policy = DQNAgent(self.cfg, device)
 
-    def update_exploration(self, batch: List[Transition]):
-        """Update exploration policy using batch of transitions"""
 
-        import ipdb
+class TrajectoryEmbedder(nn.Module):
+    """Trajectory embedder, embeds a sequence of transitions"""
 
-        ipdb.set_trace()
-        # convert list of transitions to Transition object
-        batch = Transition(
-            obs=torch.stack([t.obs for t in batch]),
-            action=torch.tensor([t.action for t in batch]),
-            reward=torch.tensor([t.reward for t in batch]),
-            next_obs=torch.stack([t.next_obs for t in batch]),
-            done=torch.tensor([t.done for t in batch]),
+    def __init__(self, cfg: DictConfig):
+        super().__init__()
+
+        self.state_embedder = nn.Linear(cfg.obs_dim, cfg.hidden_dim)
+        self.action_embedder = nn.Linear(1, cfg.hidden_dim)
+        self.reward_embedder = nn.Linear(1, cfg.hidden_dim)
+
+        self.transition_embedder = nn.Linear(3 * cfg.hidden_dim, cfg.hidden_dim)
+
+        self.lstm = nn.LSTM(cfg.hidden_dim, cfg.hidden_dim, batch_first=True)
+
+        self.output_layer = nn.Linear(cfg.hidden_dim, cfg.hidden_dim)
+
+    def forward(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        hidden_state: Optional[torch.Tensor] = None,
+    ):
+        state_embed = self.state_embedder(states)
+        action_embed = self.action_embedder(actions)
+        reward_embed = self.reward_embedder(rewards)
+
+        embed = self.transition_embedder(
+            torch.cat([state_embed, action_embed, reward_embed], dim=-1)
         )
 
-        # compute loss
-        loss = self._compute_loss(batch)
+        embed, hidden_state = self.lstm(embed, hidden_state)
+        embed = self.output_layer(embed)
 
-        # backpropagate
-        loss.backward()
+        return embed, hidden_state
 
 
 class DQNAgent(nn.Module):
@@ -50,6 +67,9 @@ class DQNAgent(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.device = device
+
+        self.trajectory_embedder = TrajectoryEmbedder(cfg.trajectory_embedder)
+        self.id_embedder = nn.Embedding(cfg.id_dim, cfg.hidden_dim)
 
         # Create networks
         self.q = DuelingQNetwork(
@@ -63,12 +83,89 @@ class DQNAgent(nn.Module):
         # Sync target network initially
         self.sync_target()
 
-    def _compute_loss(self, batch: List[Transition]):
+    def label_rewards(
+        self, traj_batched: List[Transition], env_ids: torch.Tensor, mask: torch.Tensor
+    ):
+        """Computes rewards for each experience in the trajectory"""
+
+        traj = [traj[0] for traj in traj_batched]
+        # [B, T, N, O]
+        obs = torch.tensor([t.obs for t in traj], device=self.device).float()
+        # [B, T, N]
+        actions = torch.tensor([t.action for t in traj], device=self.device).float()
+        # [B, T, N]
+        rewards = torch.tensor([t.reward for t in traj], device=self.device).float()
+
+        # [B, T, D]
+        transition_contexts, _ = self.trajectory_embedder(
+            obs.squeeze(2), actions, rewards
+        )
+        import ipdb
+
+        ipdb.set_trace()
+        id_contexts = self.id_embedder(env_ids.long())
+
+        distances = (
+            (
+                transition_contexts
+                - id_contexts.unsqueeze(1).expand_as(transition_contexts).detach()
+            )
+            ** 2
+        ).sum(-1)
+        # Add penalty
+        rewards = distances[:, :-1] - distances[:, 1:] - self.cfg.penalty
+        return (rewards * mask[:, 1:]).detach(), distances
+
+    def _compute_loss(
+        self, batch: List[Transition], mask: torch.Tensor, relabel_rewards: bool = False
+    ):
         """Compute standard Double DQN loss
 
         dqn loss = (r + gamma * max_a Q(s', a') - Q(s, a))**2
+
+        Args:
+            batch: List[Transition]
+            mask: torch.Tensor
         """
-        pass
+        with torch.no_grad():
+            # [B, T, N, A]
+            next_q_values, _ = self.target_q(batch.next_obs)
+            # [B, T, N]
+            next_action = next_q_values.argmax(dim=-1)
+
+        # [B, T, N, A]
+        q_values, _ = self.q(batch.obs)
+        # [B, T, N, A]
+        q_values_next, _ = self.q(batch.next_obs)
+
+        # [B, T, N, 1]
+        q_values_next_target = q_values_next.gather(
+            -1, next_action.unsqueeze(-1)
+        ).squeeze(-1)
+
+        rewards = batch.reward
+
+        if relabel_rewards:
+            rewards = self.label_rewards(
+                batch.trajectory, env_ids=batch.env_id, mask=mask
+            )
+
+        # [B, T, N]
+        target_q_values = rewards + self.cfg.gamma * q_values_next_target
+
+        current_q_values = q_values.gather(
+            -1, batch.action.long().unsqueeze(-1)
+        ).squeeze(-1)
+
+        # [B, T, N]
+        loss = F.mse_loss(current_q_values, target_q_values, reduction="none")
+
+        # [B, T, N]
+        weights = mask.float().unsqueeze(-1)  # for the env dimension
+        loss = loss * weights
+        loss = loss.sum() / mask.sum()
+
+        return loss
 
     def select_action(
         self,
@@ -126,7 +223,7 @@ class DuelingQNetwork(nn.Module):
         """Forward pass
 
         Args:
-            obs: Batch of obs (batch_size, input_dim)
+            obs: Batch of obs (B, T, N, D)
             hidden_state: Not used, kept for compatibility
 
         Returns:

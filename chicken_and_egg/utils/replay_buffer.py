@@ -41,6 +41,9 @@ class ReplayBuffer:
         indices = np.random.randint(len(self._storage), size=batch_size)
         return [self._storage[i] for i in indices]
 
+    def size(self) -> int:
+        return len(self._storage)
+
 
 class SequentialReplayBuffer(ReplayBuffer):
     """Replay buffer that samples sequences of contiguous transitions"""
@@ -90,3 +93,6 @@ class SequentialReplayBuffer(ReplayBuffer):
                 sequence = sequence[start : start + self._sequence_length]
             sequences.append(sequence)
         return sequences
+
+    def size(self) -> int:
+        return len(self._storage)

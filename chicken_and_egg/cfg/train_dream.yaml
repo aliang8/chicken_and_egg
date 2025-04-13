@@ -8,6 +8,7 @@ buffer:
   
 num_train_envs: 1
 num_eval_envs: 1
+start_training_at: 100
 
 data:
   batch_size: 32

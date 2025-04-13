@@ -13,6 +13,7 @@ class DarkRoom(gym.Env):
         hard_reward=False,
         minval=0,
         maxval=3,
+        max_num_steps=20,
     ):
         self.rand_start = rand_start
         self.hard_reward = hard_reward
@@ -28,6 +29,7 @@ class DarkRoom(gym.Env):
         self.rx = None
         self.ry = None
         self.rr = None
+        self.max_num_steps = max_num_steps
 
     @property
     def action_space(self):
@@ -64,11 +66,20 @@ class DarkRoom(gym.Env):
 
         obs = self.get_obs(ax, ay)
         self.current_state = (ax, ay)  # Store as (x, y)
-        return obs, reward, False, False, self.get_info()
+        self.steps_taken += 1
+        return (
+            obs,
+            reward,
+            self.steps_taken >= self.max_num_steps,
+            False,
+            self.get_info(),
+        )
 
     def reset(self, seed: int = None, reset_task: bool = False, **kwargs):
         if seed is not None:
             np.random.seed(seed)
+
+        self.steps_taken = 0
 
         if self.rand_start:  # start the agent at a random location
             ax = np.random.randint(0, self.w)

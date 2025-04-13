@@ -170,10 +170,18 @@ class BaseTrainer:
     def setup_model(self):
         pass
 
+    def get_optimizer(self, params, optimizer_cfg: DictConfig):
+        opt_cls = getattr(torch.optim, optimizer_cfg.name)
+        optimizer = opt_cls(params, **optimizer_cfg.params)
+        return optimizer
+
+    def get_scheduler(self, optimizer, scheduler_cfg: DictConfig):
+        scheduler_cls = getattr(torch.optim.lr_scheduler, scheduler_cfg.name)
+        scheduler = scheduler_cls(optimizer, **scheduler_cfg.params)
+        return scheduler
+
     def setup_optimizer_and_scheduler(self):
-        opt_cls = getattr(torch.optim, self.cfg.optimizer.name)
-        optimizer = opt_cls(self.model.parameters(), **self.cfg.optimizer.params)
-        scheduler_cls = getattr(torch.optim.lr_scheduler, self.cfg.lr_scheduler.name)
+        optimizer = self.get_optimizer(self.model.parameters(), self.cfg.optimizer)
 
         log(
             f"using opt: {self.cfg.optimizer.name}, scheduler: {self.cfg.lr_scheduler.name}",
@@ -192,8 +200,7 @@ class BaseTrainer:
             total_iters=num_warmup_steps,
         )
 
-        scheduler = scheduler_cls(optimizer, **self.cfg.lr_scheduler.params)
-
+        scheduler = self.get_scheduler(optimizer, self.cfg.lr_scheduler)
         scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer,
             [warmstart_scheduler, scheduler],

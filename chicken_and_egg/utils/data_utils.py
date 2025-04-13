@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+import numpy as np
 import torch
 
 
@@ -13,3 +14,6 @@ class Transition:
     done: bool
     info: Dict = field(default_factory=dict)
     hidden_state: Optional[torch.Tensor] = None
+    trajectory: Optional[List[Any]] = None
+    index: Optional[int] = None
+    env_id: Optional[np.ndarray] = None
