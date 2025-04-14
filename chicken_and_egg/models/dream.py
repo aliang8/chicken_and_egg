@@ -73,11 +73,17 @@ class DQNAgent(nn.Module):
 
         # Create networks
         self.q = DuelingQNetwork(
-            num_actions=cfg.act_dim, input_dim=cfg.obs_dim, hidden_dim=cfg.hidden_dim
+            num_actions=cfg.act_dim,
+            input_dim=cfg.obs_dim,
+            hidden_dim=cfg.hidden_dim,
+            trajectory_embedder=self.trajectory_embedder,
         )
 
         self.target_q = DuelingQNetwork(
-            num_actions=cfg.act_dim, input_dim=cfg.obs_dim, hidden_dim=cfg.hidden_dim
+            num_actions=cfg.act_dim,
+            input_dim=cfg.obs_dim,
+            hidden_dim=cfg.hidden_dim,
+            trajectory_embedder=self.trajectory_embedder,
         )
 
         # Sync target network initially
@@ -179,7 +185,7 @@ class DQNAgent(nn.Module):
             obs: [B, obs_dim]
         """
         obs_tensor = torch.from_numpy(obs).to(self.device).float()
-        q_values, _ = self.q(obs_tensor)
+        q_values, hidden_state = self.q(obs_tensor, hidden_state)
 
         # Use smaller epsilon during testing
         epsilon = self.cfg.test_epsilon if test else self.cfg.epsilon
@@ -213,6 +219,8 @@ class DuelingQNetwork(nn.Module):
             nn.Dropout(0.1),
         )
 
+        self.obs_embedder_lstm = nn.LSTM(hidden_dim, hidden_dim, batch_first=True)
+
         # Advantage and value heads
         self.advantage = nn.Linear(hidden_dim, num_actions)
         self.value = nn.Linear(hidden_dim, 1)
@@ -232,6 +240,10 @@ class DuelingQNetwork(nn.Module):
         """
         # Get obs embeddings
         obs_embed = self.obs_embedder(obs)
+        obs_embed, hidden_state = self.obs_embedder_lstm(obs_embed, hidden_state)
+
+        # Get trajectory embed! I think this is for the exploit policy
+        # but not sure
 
         # Compute advantage and value streams
         advantage = self.advantage(obs_embed)
