@@ -40,6 +40,7 @@ python main.py --config-name=train_dream \
 # FETE
 python main.py --config-name=train_fete \
   env=darkroom \
-  run_id=0000
+  run_id=0000 \
+  skip_first_eval=True 
 ```
 

@@ -27,7 +27,7 @@ class FETETrainer(BaseTrainer):
         model = FETE(self.cfg.model)
         return model
 
-    def rollout_trial(
+    def rollout_meta_episode(
         self,
         env: gym.Env,
         policy_type: str,
@@ -55,7 +55,12 @@ class FETETrainer(BaseTrainer):
         trial_ids = context["trial_ids"]
         infos = context["infos"]
 
-        obs, info = env.reset(options={"reset_task": False})
+        if trial_id == 0:
+            reset_task = True
+        else:
+            reset_task = False
+
+        obs, info = env.reset(options={"reset_task": reset_task})
         obs = torch.from_numpy(obs).to(self.device)
 
         # add the new observations to the context
@@ -207,7 +212,7 @@ class FETETrainer(BaseTrainer):
         }
         return context
 
-    def train_step(self):
+    def run_single_episode(self):
         """
         Runs a single training step. This is a single rollout (episode) of the policy which consists of
         1 trials followed by 1 exploit trial.
@@ -222,19 +227,19 @@ class FETETrainer(BaseTrainer):
         explore_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
         exploit_loss = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
 
-        # best_r = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
-
-        # reset best_r every epoch
-        self.best_r = torch.tensor(0.0).to(self.device)
+        # reset best_r for each parallel environment
+        # best_r is also reset every trial
+        best_r = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
 
         # this is a single rollout of the policy
         # rollout N trials
         with torch.amp.autocast("cuda"):
             policy_context = self._init_context(self.cfg.num_train_envs)
+
             for trial_id in range(self.cfg.num_trials):
                 # run one trial of explore policy
                 # and add this to the context for the exploit policy
-                r_explore, l_explore, policy_context = self.rollout_trial(
+                r_explore, l_explore, policy_context = self.rollout_meta_episode(
                     env=self.train_envs,
                     policy_type="explore",
                     context=policy_context,
@@ -243,7 +248,9 @@ class FETETrainer(BaseTrainer):
                 )
                 # run one trial of exploit policy which is used as feedback
                 # to train the explore policy
-                r_exploit, l_exploit, _ = self.rollout_trial(
+                # NOTE: during training, we don't include the context from the exploit policy
+                # so these transitions are ignored
+                r_exploit, l_exploit, _ = self.rollout_meta_episode(
                     env=self.train_envs,
                     policy_type="exploit",
                     context=policy_context,
@@ -255,7 +262,7 @@ class FETETrainer(BaseTrainer):
                 # good exploit trials meet or surpass previous exploit returns in the
                 # meta-rollout sequence
                 # train the explot policy here
-                mask = r_exploit >= self.best_r
+                mask = r_exploit >= best_r
                 total_loss += l_exploit * mask
                 exploit_loss += l_exploit * mask
 
@@ -263,22 +270,12 @@ class FETETrainer(BaseTrainer):
                 # good explore trials are followed by the exploit policy achieving
                 # higher trial returns than those seen so far
                 # train the explore policy here
-                mask2 = r_exploit > self.best_r
+                mask2 = r_exploit > best_r
                 total_loss += l_explore * mask2
                 explore_loss += l_explore * mask2
-                # best_r = r_exploit * mask + best_r * (1 - mask2.int())
-
-                # select the best reward from all the exploit trials across environments
-                r_exploit_ = r_exploit[mask2]
-                # handle max of empty tensor
 
                 # update the baseline return
-                if r_exploit_.numel() > 0:
-                    self.best_r = r_exploit_.max()
-                else:
-                    self.best_r = self.best_r
-
-                # log(f"Epoch: {self.current_epoch}, Best R: {best_r}")
+                best_r = torch.max(best_r, r_exploit)
 
         # average loss over number of environments
         total_loss = total_loss.mean()
@@ -303,13 +300,9 @@ class FETETrainer(BaseTrainer):
             "loss": total_loss.item(),
             "explore_loss": explore_loss.item(),
             "exploit_loss": exploit_loss.item(),
-            "best_r": self.best_r.item(),
+            "best_r": best_r.mean().item(),
             **metrics,
         }
-
-        self.log_to_wandb(train_metrics, prefix="train/")
-        self.log_to_wandb({"_update": self.current_epoch}, prefix="step/")
-
         return train_metrics
 
     def _generate_plots(self, policy_context):
@@ -604,7 +597,7 @@ class FETETrainer(BaseTrainer):
             trial_id = 0
             # we combine the exploit and explore policies for evaluation
             for _ in range(num_explore):
-                r_explore, _, policy_context = self.rollout_trial(
+                r_explore, _, policy_context = self.rollout_meta_episode(
                     env=self.eval_envs,
                     policy_type="explore",
                     context=policy_context,
@@ -614,7 +607,7 @@ class FETETrainer(BaseTrainer):
                 trial_id += 1
 
             for _ in range(num_exploit):
-                r_exploit, _, policy_context = self.rollout_trial(
+                r_exploit, _, policy_context = self.rollout_meta_episode(
                     env=self.eval_envs,
                     policy_type="exploit",
                     context=policy_context,
@@ -643,6 +636,8 @@ class FETETrainer(BaseTrainer):
         if not self.cfg.skip_first_eval:
             eval_metrics = self.eval()
 
+        total_timesteps = 0
+        start_time = time.time()
         for self.current_epoch in tqdm.tqdm(
             range(self.cfg.num_epochs), desc="Training", total=self.cfg.num_epochs
         ):
@@ -653,7 +648,22 @@ class FETETrainer(BaseTrainer):
                 )
                 self.model.update_behavior_policy()
 
-            train_metrics = self.train_step()
+            trial_start = time.time()
+            train_metrics = self.run_single_episode()
+            trial_end = time.time()
+
+            total_timesteps += (
+                self.cfg.env.timesteps_per_trial
+                * self.cfg.num_train_envs
+                * self.cfg.env.num_trials
+            )
+
+            fps = total_timesteps / (time.time() - start_time)
+
+            train_metrics["time/trial_time"] = trial_end - trial_start
+            train_metrics["time/fps"] = fps
+            self.log_to_wandb(train_metrics, prefix="train/")
+            self.log_to_wandb({"_update": self.current_epoch}, prefix="step/")
 
             if self.current_epoch % self.cfg.eval_every == 0:
                 eval_metrics = self.eval()
@@ -662,7 +672,7 @@ class FETETrainer(BaseTrainer):
                     wandb.log(eval_metrics)
 
                 log(
-                    f"Epoch {self.current_epoch}: Train Loss = {train_metrics['loss']:.4f}, Eval Mean Ep Ret = {eval_metrics['eval/mean_ep_ret']:.4f}, Eval Std Ep Ret = {eval_metrics['eval/std_ep_ret']:.4f}",
+                    f"E {self.current_epoch}, T {total_timesteps}, FPS {fps:.2f}: Train Loss = {train_metrics['loss']:.4f}, Eval Mean Ep Ret = {eval_metrics['eval/mean_ep_ret']:.4f}, Eval Std Ep Ret = {eval_metrics['eval/std_ep_ret']:.4f}",
                     color="blue",
                 )
 
