@@ -79,6 +79,9 @@ class DarkRoom(gym.Env):
         if seed is not None:
             np.random.seed(seed)
 
+        if "options" in kwargs:
+            reset_task = kwargs["options"]["reset_task"]
+
         self.steps_taken = 0
 
         if self.rand_start:  # start the agent at a random location

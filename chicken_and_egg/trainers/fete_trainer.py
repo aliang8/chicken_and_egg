@@ -27,7 +27,7 @@ class FETETrainer(BaseTrainer):
         model = FETE(self.cfg.model)
         return model
 
-    def rollout_meta_episode(
+    def rollout_episode(
         self,
         env: gym.Env,
         policy_type: str,
@@ -52,7 +52,7 @@ class FETETrainer(BaseTrainer):
         actions_context = context["actions"]
         mask = context["mask"]
         timesteps = context["timesteps"]
-        trial_ids = context["trial_ids"]
+        episode_ids = context["episode_ids"]
         infos = context["infos"]
 
         if trial_id == 0:
@@ -71,9 +71,9 @@ class FETETrainer(BaseTrainer):
         mask[:, -1] = 1
         # set the last mask to 1
 
-        # roll trial_id
-        trial_ids = torch.roll(trial_ids, shifts=-1, dims=1)
-        trial_ids[:, -1] = trial_id
+        # roll episode ids
+        episode_ids = torch.roll(episode_ids, shifts=-1, dims=1)
+        episode_ids[:, -1] = trial_id
 
         timesteps = torch.roll(timesteps, shifts=-1, dims=1)
         timesteps[:, -1] = 0
@@ -92,7 +92,7 @@ class FETETrainer(BaseTrainer):
                 "rewards": rewards_context,
                 "timesteps": timesteps,
                 "attention_mask": mask,
-                "trial_ids": trial_ids,
+                "episode_ids": episode_ids,
             }
 
             # don't update the behavior policy, see paper
@@ -147,8 +147,8 @@ class FETETrainer(BaseTrainer):
                 trial_id_tensor = einops.repeat(
                     trial_id_tensor, " -> b", b=env.num_envs
                 ).to(self.device)
-                trial_ids = torch.roll(trial_ids, shifts=-1, dims=1)
-                trial_ids[:, -1] = trial_id_tensor
+                episode_ids = torch.roll(episode_ids, shifts=-1, dims=1)
+                episode_ids[:, -1] = trial_id_tensor
                 timesteps = torch.roll(timesteps, shifts=-1, dims=1)
                 timesteps[:, -1] = ts + 1
                 infos.append(info)
@@ -175,7 +175,7 @@ class FETETrainer(BaseTrainer):
             "actions": actions_context,
             "mask": mask,
             "timesteps": timesteps,
-            "trial_ids": trial_ids,
+            "episode_ids": episode_ids,
             "infos": infos,
         }
 
@@ -199,7 +199,7 @@ class FETETrainer(BaseTrainer):
         actions_context = torch.zeros(batch_size, T, 1).to(self.device)
         mask = torch.zeros(batch_size, T).to(self.device)
         timesteps = torch.zeros(batch_size, T).to(self.device).long()
-        trial_ids = torch.zeros(batch_size, T).to(self.device).long()
+        episode_ids = torch.zeros(batch_size, T).to(self.device).long()
 
         context = {
             "observations": observations_context,
@@ -207,12 +207,12 @@ class FETETrainer(BaseTrainer):
             "actions": actions_context,
             "mask": mask,
             "timesteps": timesteps,
-            "trial_ids": trial_ids,
+            "episode_ids": episode_ids,
             "infos": [],
         }
         return context
 
-    def run_single_episode(self):
+    def run_single_trial(self):
         """
         Runs a single training step. This is a single rollout (episode) of the policy which consists of
         1 trials followed by 1 exploit trial.
@@ -232,14 +232,18 @@ class FETETrainer(BaseTrainer):
         best_r = torch.zeros(self.cfg.num_train_envs, 1).to(self.device)
 
         # this is a single rollout of the policy
-        # rollout N trials
+        # rollout N episodes
         with torch.amp.autocast("cuda"):
             policy_context = self._init_context(self.cfg.num_train_envs)
 
-            for trial_id in range(self.cfg.num_trials):
+            explore_returns = []
+            exploit_returns = []
+
+            # If we want N episodes, we need to rollout N-1 explore / exploit pairs.
+            for trial_id in range(self.cfg.num_trials - 1):
                 # run one trial of explore policy
                 # and add this to the context for the exploit policy
-                r_explore, l_explore, policy_context = self.rollout_meta_episode(
+                r_explore, l_explore, policy_context = self.rollout_episode(
                     env=self.train_envs,
                     policy_type="explore",
                     context=policy_context,
@@ -250,7 +254,7 @@ class FETETrainer(BaseTrainer):
                 # to train the explore policy
                 # NOTE: during training, we don't include the context from the exploit policy
                 # so these transitions are ignored
-                r_exploit, l_exploit, _ = self.rollout_meta_episode(
+                r_exploit, l_exploit, _ = self.rollout_episode(
                     env=self.train_envs,
                     policy_type="exploit",
                     context=policy_context,
@@ -277,6 +281,10 @@ class FETETrainer(BaseTrainer):
                 # update the baseline return
                 best_r = torch.max(best_r, r_exploit)
 
+                # average across environments
+                explore_returns.append(r_explore.mean().item())
+                exploit_returns.append(r_exploit.mean().item())
+
         # average loss over number of environments
         total_loss = total_loss.mean()
         explore_loss = explore_loss.mean()
@@ -300,6 +308,8 @@ class FETETrainer(BaseTrainer):
             "loss": total_loss.item(),
             "explore_loss": explore_loss.item(),
             "exploit_loss": exploit_loss.item(),
+            "explore_ret_trial": np.mean(explore_returns),
+            "exploit_ret_trial": np.mean(exploit_returns),
             "best_r": best_r.mean().item(),
             **metrics,
         }
@@ -332,14 +342,14 @@ class FETETrainer(BaseTrainer):
 
     def _visualize_return(self, policy_context):
         rewards = policy_context["rewards"]  # [N, T, 1]
-        trial_ids = policy_context["trial_ids"]  # [N, T]
+        episode_ids = policy_context["episode_ids"]  # [N, T]
 
         # For each environment
         num_save = min(self.cfg.num_eval_rollouts_save, rewards.shape[0])
         for env_idx in range(num_save):
             # Get rewards for this environment
             rewards_env = rewards[env_idx].cpu().numpy()
-            trial_ids_env = trial_ids[env_idx].cpu().numpy()
+            episode_ids_env = episode_ids[env_idx].cpu().numpy()
 
             # Calculate cumulative return
             ep_ret = np.cumsum(rewards_env, axis=0)
@@ -361,10 +371,10 @@ class FETETrainer(BaseTrainer):
             )
 
             # Add vertical lines at trial boundaries
-            unique_trials = np.unique(trial_ids_env)
+            unique_trials = np.unique(episode_ids_env)
             for trial_id in unique_trials[1:]:  # Skip first boundary
                 # Find first occurrence of this trial_id
-                trial_boundary = np.where(trial_ids_env == trial_id)[0][0]
+                trial_boundary = np.where(episode_ids_env == trial_id)[0][0]
                 plt.axvline(x=trial_boundary, color="r", linestyle="--", alpha=0.5)
                 # Add trial number
                 plt.text(
@@ -408,7 +418,7 @@ class FETETrainer(BaseTrainer):
         # Extract relevant information
         observations = policy_context["observations"]  # [N, T, 2]
         rewards = policy_context["rewards"]  # [N, T, 1]
-        trial_ids = policy_context["trial_ids"]  # [N, T]
+        episode_ids = policy_context["episode_ids"]  # [N, T]
         actions = policy_context["actions"]  # [N, T, 1]
         infos = policy_context["infos"]  # List of dicts
 
@@ -542,7 +552,7 @@ class FETETrainer(BaseTrainer):
 
                 # Add text
                 current_ret = float(ret[t, 0]) if t < len(ret) else float(ret[-1, 0])
-                current_trial = int(trial_ids[env_idx, t].cpu().item())
+                current_trial = int(episode_ids[env_idx, t].cpu().item())
                 action = int(actions[env_idx, t].cpu().item())
                 plt.title(
                     f"Step: {t}, Return: {current_ret:.2f}, Trial: {current_trial}\n"
@@ -567,11 +577,13 @@ class FETETrainer(BaseTrainer):
 
             # Save video
             video_path = (
-                Path(self.cfg.exp_dir) / "eval_rollouts" / f"rollout_{env_idx}.mp4"
+                Path(self.cfg.exp_dir)
+                / "eval_rollouts"
+                / f"rollout_{env_idx}_{self.current_epoch}.mp4"
             )
             video_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                imageio.mimsave(str(video_path), frames, fps=1)
+                imageio.mimsave(str(video_path), frames, fps=5)
                 log(f"Saved rollout animation to {video_path}", color="green")
 
                 # Log to wandb
@@ -597,7 +609,7 @@ class FETETrainer(BaseTrainer):
             trial_id = 0
             # we combine the exploit and explore policies for evaluation
             for _ in range(num_explore):
-                r_explore, _, policy_context = self.rollout_meta_episode(
+                r_explore, _, policy_context = self.rollout_episode(
                     env=self.eval_envs,
                     policy_type="explore",
                     context=policy_context,
@@ -607,7 +619,7 @@ class FETETrainer(BaseTrainer):
                 trial_id += 1
 
             for _ in range(num_exploit):
-                r_exploit, _, policy_context = self.rollout_meta_episode(
+                r_exploit, _, policy_context = self.rollout_episode(
                     env=self.eval_envs,
                     policy_type="exploit",
                     context=policy_context,
@@ -649,7 +661,7 @@ class FETETrainer(BaseTrainer):
                 self.model.update_behavior_policy()
 
             trial_start = time.time()
-            train_metrics = self.run_single_episode()
+            train_metrics = self.run_single_trial()
             trial_end = time.time()
 
             total_timesteps += (
