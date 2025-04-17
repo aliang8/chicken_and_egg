@@ -3,7 +3,15 @@ from typing import Dict
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig
+
+
+def compute_entropy(logits):
+    """
+    Compute the entropy of a logits tensor.
+    """
+    return F.softmax(logits, dim=-1) * F.log_softmax(logits, dim=-1)
 
 
 def format_dict_keys(dictionary, format_fn):

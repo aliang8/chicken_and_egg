@@ -1,0 +1,3 @@
+[submodule "chicken_and_egg/cae_commons"]
+	path = chicken_and_egg/cae_commons
+	url = git@github.com:robbycostales/cae_commons.git

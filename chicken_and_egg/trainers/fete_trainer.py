@@ -14,7 +14,7 @@ from omegaconf import DictConfig
 
 from chicken_and_egg.models.fete import FETE
 from chicken_and_egg.trainers.base_trainer import BaseTrainer
-from chicken_and_egg.utils.general_utils import to_numpy
+from chicken_and_egg.utils.general_utils import compute_entropy, to_numpy
 from chicken_and_egg.utils.logger import log
 
 
@@ -39,13 +39,10 @@ class FETETrainer(BaseTrainer):
         Rollout a trial for the GPT-2 based transformer policy.
 
         Returns:
-            trial_return: float
+            ep_ret: float
             action_loss: float
             context: Dict[str, torch.Tensor], [N, T, ...]
         """
-        action_loss = torch.zeros(env.num_envs, 1).to(self.device)
-        trial_return = torch.zeros(env.num_envs, 1).to(self.device)
-
         # for exploitation, use the context from the exploration policy
         observations_context = context["observations"]
         rewards_context = context["rewards"]
@@ -83,6 +80,12 @@ class FETETrainer(BaseTrainer):
         actions_context = torch.roll(actions_context, shifts=-1, dims=1)
         infos.append(info)
 
+        behavior_entropy = []
+        successor_entropy = []
+
+        action_loss = torch.zeros(env.num_envs, 1).to(self.device)
+        ep_ret = torch.zeros(env.num_envs, 1).to(self.device)
+
         for ts in range(self.cfg.env.timesteps_per_trial):
             # [N, T, A], do not update the gradients for the behavior policy
             # these will be updated by copying the weights from the successor policy
@@ -91,7 +94,7 @@ class FETETrainer(BaseTrainer):
                 "actions": actions_context,
                 "rewards": rewards_context,
                 "timesteps": timesteps,
-                "attention_mask": mask,
+                "attention_mask": ~mask.bool(),  # be careful here 1 means we mask and 0 means we attend
                 "episode_ids": episode_ids,
             }
 
@@ -105,6 +108,14 @@ class FETETrainer(BaseTrainer):
             successor_logits = self.model(
                 **policy_kwargs, policy_type=f"{policy_type}_successor"
             )
+
+            # compute entropy of logits
+            successor_entropy = compute_entropy(successor_logits)
+            successor_entropy = successor_entropy.sum(dim=-1)
+
+            # compute entropy of behavior logits
+            behavior_entropy = compute_entropy(behavior_logits)
+            behavior_entropy = behavior_entropy.sum(dim=-1)
 
             # compute hadamard product of logits
             logits = behavior_logits * successor_logits
@@ -163,7 +174,7 @@ class FETETrainer(BaseTrainer):
                 rewards_context[:, -1] = reward
                 actions_context[:, -1] = action_t
 
-            trial_return += reward
+            ep_ret += reward
 
             # assumes all envs finish at the same time
             if done.all():
@@ -179,9 +190,15 @@ class FETETrainer(BaseTrainer):
             "infos": infos,
         }
 
+        episode_metrics = {
+            "successor_entropy": successor_entropy.mean().item(),
+            "behavior_entropy": behavior_entropy.mean().item(),
+            "ep_ret": ep_ret.mean().item(),
+        }
+
         # average loss across the environments
         action_loss /= env.num_envs
-        return trial_return, action_loss, new_context
+        return ep_ret, action_loss, new_context, episode_metrics
 
     def _init_context(self, batch_size: int = 1):
         T = self.cfg.env.timesteps_per_trial * self.cfg.num_trials
@@ -236,25 +253,26 @@ class FETETrainer(BaseTrainer):
         with torch.amp.autocast("cuda"):
             policy_context = self._init_context(self.cfg.num_train_envs)
 
-            explore_returns = []
-            exploit_returns = []
+            trial_metrics = []
 
             # If we want N episodes, we need to rollout N-1 explore / exploit pairs.
             for trial_id in range(self.cfg.num_trials - 1):
                 # run one trial of explore policy
                 # and add this to the context for the exploit policy
-                r_explore, l_explore, policy_context = self.rollout_episode(
-                    env=self.train_envs,
-                    policy_type="explore",
-                    context=policy_context,
-                    trial_id=trial_id,
-                    sample_actions=True,
+                r_explore, l_explore, policy_context, episode_metrics = (
+                    self.rollout_episode(
+                        env=self.train_envs,
+                        policy_type="explore",
+                        context=policy_context,
+                        trial_id=trial_id,
+                        sample_actions=True,
+                    )
                 )
                 # run one trial of exploit policy which is used as feedback
                 # to train the explore policy
                 # NOTE: during training, we don't include the context from the exploit policy
                 # so these transitions are ignored
-                r_exploit, l_exploit, _ = self.rollout_episode(
+                r_exploit, l_exploit, _, episode_metrics = self.rollout_episode(
                     env=self.train_envs,
                     policy_type="exploit",
                     context=policy_context,
@@ -281,9 +299,7 @@ class FETETrainer(BaseTrainer):
                 # update the baseline return
                 best_r = torch.max(best_r, r_exploit)
 
-                # average across environments
-                explore_returns.append(r_explore.mean().item())
-                exploit_returns.append(r_exploit.mean().item())
+                trial_metrics.append(episode_metrics)
 
         # average loss over number of environments
         total_loss = total_loss.mean()
@@ -304,12 +320,14 @@ class FETETrainer(BaseTrainer):
         metrics["time/update"] = time.time() - update_time
         metrics["lr"] = self.scheduler.get_last_lr()[0]
 
+        # compute metrics for each trial
+        for k, v in trial_metrics[0].items():
+            metrics[f"{k}_trial"] = np.mean([t[k] for t in trial_metrics])
+
         train_metrics = {
             "loss": total_loss.item(),
             "explore_loss": explore_loss.item(),
             "exploit_loss": exploit_loss.item(),
-            "explore_ret_trial": np.mean(explore_returns),
-            "exploit_ret_trial": np.mean(exploit_returns),
             "best_r": best_r.mean().item(),
             **metrics,
         }
@@ -609,7 +627,7 @@ class FETETrainer(BaseTrainer):
             trial_id = 0
             # we combine the exploit and explore policies for evaluation
             for _ in range(num_explore):
-                r_explore, _, policy_context = self.rollout_episode(
+                r_explore, _, policy_context, episode_metrics = self.rollout_episode(
                     env=self.eval_envs,
                     policy_type="explore",
                     context=policy_context,
@@ -619,7 +637,7 @@ class FETETrainer(BaseTrainer):
                 trial_id += 1
 
             for _ in range(num_exploit):
-                r_exploit, _, policy_context = self.rollout_episode(
+                r_exploit, _, policy_context, episode_metrics = self.rollout_episode(
                     env=self.eval_envs,
                     policy_type="exploit",
                     context=policy_context,
