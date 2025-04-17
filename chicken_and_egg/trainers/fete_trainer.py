@@ -1,5 +1,4 @@
 import time
-from pathlib import Path
 from typing import Dict
 
 import einops
@@ -86,7 +85,7 @@ class FETETrainer(BaseTrainer):
         action_loss = torch.zeros(env.num_envs, 1).to(self.device)
         ep_ret = torch.zeros(env.num_envs, 1).to(self.device)
 
-        for ts in range(self.cfg.env.timesteps_per_trial):
+        for ts in range(self.cfg.env.timesteps_per_episode):
             # [N, T, A], do not update the gradients for the behavior policy
             # these will be updated by copying the weights from the successor policy
             policy_kwargs = {
@@ -145,7 +144,7 @@ class FETETrainer(BaseTrainer):
             # update context by appending new state, reward and action
 
             # if its the last timestep, don't append the next state
-            if ts < self.cfg.env.timesteps_per_trial - 1:
+            if ts < self.cfg.env.timesteps_per_episode - 1:
                 observations_context = torch.roll(
                     observations_context, shifts=-1, dims=1
                 )
@@ -201,9 +200,9 @@ class FETETrainer(BaseTrainer):
         return ep_ret, action_loss, new_context, episode_metrics
 
     def _init_context(self, batch_size: int = 1):
-        T = self.cfg.env.timesteps_per_trial * self.cfg.num_trials
+        T = self.cfg.env.timesteps_per_episode * self.cfg.num_episodes
         # add some dummy timesteps for the initial obs
-        # T += self.cfg.num_trials
+        # T += self.cfg.num_episodes
         # T += 1  # for padding (?)
 
         # keep track of context here for observation, reward and action
@@ -256,7 +255,7 @@ class FETETrainer(BaseTrainer):
             trial_metrics = []
 
             # If we want N episodes, we need to rollout N-1 explore / exploit pairs.
-            for trial_id in range(self.cfg.num_trials - 1):
+            for trial_id in range(self.cfg.num_episodes - 1):
                 # run one trial of explore policy
                 # and add this to the context for the exploit policy
                 r_explore, l_explore, policy_context, episode_metrics = (
@@ -342,9 +341,9 @@ class FETETrainer(BaseTrainer):
             plt.figure(figsize=(10, 5))
             plt.plot(ep_ret)
             # add vertical line at each episode end
-            for i in range(self.cfg.num_trials):
+            for i in range(self.cfg.num_episodes):
                 plt.axvline(
-                    x=i * self.cfg.env.timesteps_per_trial, color="k", linestyle="--"
+                    x=i * self.cfg.env.timesteps_per_episode, color="k", linestyle="--"
                 )
 
             plt.title("Episode Return")
@@ -356,74 +355,30 @@ class FETETrainer(BaseTrainer):
             plt.close()
         elif self.cfg.env.env_name == "darkroom":
             self._visualize_return(policy_context)
-            self._visualize_darkroom_traj(policy_context)
+            # self._visualize_darkroom_traj(policy_context)
 
     def _visualize_return(self, policy_context):
-        rewards = policy_context["rewards"]  # [N, T, 1]
-        episode_ids = policy_context["episode_ids"]  # [N, T]
+        from cae_commons.viz.darkroom import visualize_return
 
-        # For each environment
-        num_save = min(self.cfg.num_eval_rollouts_save, rewards.shape[0])
-        for env_idx in range(num_save):
-            # Get rewards for this environment
-            rewards_env = rewards[env_idx].cpu().numpy()
-            episode_ids_env = episode_ids[env_idx].cpu().numpy()
+        images = visualize_return(
+            policy_context,
+            self.cfg.num_eval_rollouts_save,
+            self.cfg.num_episodes,
+            self.cfg.env.timesteps_per_episode,
+        )
 
-            # Calculate cumulative return
-            ep_ret = np.cumsum(rewards_env, axis=0)
+        render_images = []
+        for i, image in enumerate(images):
+            render_images.append(wandb.Image(image, caption=f"Eval Rollout {i}"))
 
-            # Create figure
-            plt.figure(figsize=(12, 6))
-
-            # Adjust subplot margins to make room for title
-            plt.subplots_adjust(top=0.85)
-
-            # Plot cumulative return
-            plt.plot(ep_ret, "b-", label="Cumulative Return")
-
-            # Add vertical line after explore is over
-            plt.axvline(
-                x=self.cfg.num_eval_explore_trials * self.cfg.env.timesteps_per_trial,
-                color="k",
-                linestyle="--",
-            )
-
-            # Add vertical lines at trial boundaries
-            unique_trials = np.unique(episode_ids_env)
-            for trial_id in unique_trials[1:]:  # Skip first boundary
-                # Find first occurrence of this trial_id
-                trial_boundary = np.where(episode_ids_env == trial_id)[0][0]
-                plt.axvline(x=trial_boundary, color="r", linestyle="--", alpha=0.5)
-                # Add trial number
-                plt.text(
-                    trial_boundary,
-                    plt.ylim()[1],
-                    f"T{trial_id}",
-                    rotation=0,
-                    ha="right",
-                    va="bottom",
-                )
-
-            # Use suptitle instead of title to place it higher
-            plt.suptitle(f"Cumulative Reward - Env {env_idx}", y=0.95)
-            plt.xlabel("Steps")
-            plt.ylabel("Cumulative Return")
-            plt.grid(True, alpha=0.3)
-
-            # Save plot
-            plot_path = Path(self.cfg.exp_dir) / "ep_ret" / f"ep_ret_{env_idx}.png"
-            plot_path.parent.mkdir(parents=True, exist_ok=True)
-            plt.savefig(plot_path, bbox_inches="tight")
-            log(f"Saved return plot to {plot_path}", color="green")
-
-            # Log to wandb
-            self.log_to_wandb({f"ep_ret_{env_idx}": wandb.Image(plt)}, prefix="ep_ret/")
-            plt.close()
+        if self.wandb_run is not None:
+            self.wandb_run.log({"eval/return_plots": render_images})
+        return render_images
 
     def _visualize_darkroom_traj(self, policy_context):
+        # this should be a list of videos
         from cae_commons.viz.darkroom import visualize_darkroom_traj
 
-        # this should be a list of videos
         videos = visualize_darkroom_traj(
             policy_context, self.cfg.num_eval_rollouts_save
         )
@@ -433,7 +388,7 @@ class FETETrainer(BaseTrainer):
             video = np.array(video)[:, :, :-1]  # remove alpha channel
             video = video.transpose(0, 3, 1, 2)  # HWC -> CHW
             render_videos.append(
-                wandb.Video(video, caption="Query Video", fps=10, format="mp4")
+                wandb.Video(video, caption=f"Eval Rollout {i}", fps=10, format="mp4")
             )
 
         if self.wandb_run is not None:
@@ -448,7 +403,7 @@ class FETETrainer(BaseTrainer):
         self.model.eval()
 
         num_explore = self.cfg.num_eval_explore_trials
-        num_exploit = self.cfg.num_trials - num_explore
+        num_exploit = self.cfg.num_episodes - num_explore
 
         policy_context = self._init_context(batch_size=self.cfg.num_eval_envs)
         with torch.no_grad():
@@ -511,9 +466,9 @@ class FETETrainer(BaseTrainer):
             trial_end = time.time()
 
             total_timesteps += (
-                self.cfg.env.timesteps_per_trial
+                self.cfg.env.timesteps_per_episode
                 * self.cfg.num_train_envs
-                * self.cfg.env.num_trials
+                * self.cfg.env.num_episodes
             )
 
             fps = total_timesteps / (time.time() - start_time)

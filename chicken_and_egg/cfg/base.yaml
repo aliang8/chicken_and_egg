@@ -40,7 +40,7 @@ num_train_envs: 40
 num_eval_envs: 5
 
 num_eval_rollouts_save: 2
-num_trials: 1
+num_episodes: 1
 num_eval_explore_trials: 3
 debug: False
 

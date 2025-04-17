@@ -2,4 +2,4 @@ env_name: vanilla
 env_id: test
 obs_dim: 10  # Adjust based on your environment
 act_dim: 10  # Adjust based on your environment
-timesteps_per_trial: 50 
+timesteps_per_episode: 50 
