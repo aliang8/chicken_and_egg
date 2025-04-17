@@ -1,7 +1,10 @@
 from typing import Dict
 
+from cae_commons.domains.darkroom.darkroom_old import DarkRoom
+
 from chicken_and_egg.envs.bandit import Bandit, MeanBandit
-from chicken_and_egg.envs.darkroom import DarkRoom
+
+# from chicken_and_egg.envs.darkroom import DarkRoom
 
 
 def make_envs(env_name: str, num_envs: int, seed: int, env_kwargs: Dict = None):

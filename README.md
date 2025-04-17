@@ -44,3 +44,5 @@ python main.py --config-name=train_fete \
   skip_first_eval=True 
 ```
 
+# log entropy of action logits 
+
