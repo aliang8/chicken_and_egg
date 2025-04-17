@@ -421,196 +421,24 @@ class FETETrainer(BaseTrainer):
             plt.close()
 
     def _visualize_darkroom_traj(self, policy_context):
-        """Generate grid-based visualization of darkroom environment showing agent trajectory."""
-        try:
-            from io import BytesIO
+        from cae_commons.viz.darkroom import visualize_darkroom_traj
 
-            import imageio
-        except ImportError:
-            log(
-                "Please install imageio: pip install imageio imageio-ffmpeg",
-                color="red",
+        # this should be a list of videos
+        videos = visualize_darkroom_traj(
+            policy_context, self.cfg.num_eval_rollouts_save
+        )
+
+        render_videos = []
+        for i, video in enumerate(videos):
+            video = np.array(video)[:, :, :-1]  # remove alpha channel
+            video = video.transpose(0, 3, 1, 2)  # HWC -> CHW
+            render_videos.append(
+                wandb.Video(video, caption="Query Video", fps=10, format="mp4")
             )
-            return
 
-        # Extract relevant information
-        observations = policy_context["observations"]  # [N, T, 2]
-        rewards = policy_context["rewards"]  # [N, T, 1]
-        episode_ids = policy_context["episode_ids"]  # [N, T]
-        actions = policy_context["actions"]  # [N, T, 1]
-        infos = policy_context["infos"]  # List of dicts
-
-        ACTION_MAP = {0: "No-op", 1: "Up", 2: "Right", 3: "Down", 4: "Left"}
-
-        num_save = min(self.cfg.num_eval_rollouts_save, rewards.shape[0])
-
-        for env_idx in range(num_save):
-            video_start = time.time()
-            # Get first info that contains reward information
-            env_info = None
-            for info in infos:
-                if (
-                    isinstance(info, dict)
-                    and "rx" in info
-                    and "ry" in info
-                    and "rr" in info
-                ):
-                    env_info = info
-                    break
-
-            if env_info is None:
-                continue
-
-            # Setup grid dimensions
-            w, h = int(env_info["w"][env_idx]), int(env_info["h"][env_idx])
-
-            rr = env_info["rr"][env_idx]
-
-            # Get agent trajectory
-            obs = observations[env_idx].cpu().numpy()  # obs comes as [x, y]
-            rewards_env = rewards[env_idx].cpu().numpy()
-            ret = np.cumsum(rewards_env, axis=0)
-
-            # Sample frames
-            max_frames = 100
-            step = max(1, len(obs) // max_frames)
-            frame_indices = list(range(0, len(obs), step))
-            if len(obs) - 1 not in frame_indices:
-                frame_indices.append(len(obs) - 1)
-
-            frames = []
-
-            # Generate frames
-            for t in frame_indices:
-                # Create visualization grid for this frame
-                grid = np.zeros((h, w))  # Use (h, w) for matrix indexing
-                visited_grid = np.zeros((h, w))
-                visited = infos[t]["visited"][env_idx]
-
-                # Add rewards to grid, distinguishing between visited and unvisited
-                for i, (x, y, r) in enumerate(
-                    zip(
-                        env_info["rx"][env_idx],
-                        env_info["ry"][env_idx],
-                        env_info["rr"][env_idx],
-                    )
-                ):
-                    if visited[i]:
-                        visited_grid[y, x] = r  # Use [y, x] for matrix indexing
-                    else:
-                        grid[y, x] = r  # Use [y, x] for matrix indexing
-
-                # Add agent's past positions (value = -0.5)
-                for past_t in range(t):
-                    x, y = obs[past_t].astype(int)  # obs comes as [x, y]
-                    if 0 <= x < w and 0 <= y < h:
-                        if grid[y, x] == 0 and visited_grid[y, x] == 0:  # Use [y, x]
-                            grid[y, x] = -0.5  # Use [y, x]
-
-                # Add current agent position (value = -1)
-                x, y = obs[t].astype(int)
-                if 0 <= x < w and 0 <= y < h:
-                    grid[y, x] = -1  # Use [y, x]
-
-                # Add start position if not already marked (value = -0.75)
-                start_x, start_y = obs[0].astype(int)
-                if grid[start_y, start_x] == -0.5:  # Use [y, x]
-                    grid[start_y, start_x] = -0.75  # Use [y, x]
-
-                fig = plt.figure(figsize=(8, 8))
-
-                # Create custom colormap for unvisited treasures and agent
-                colors = ["blue", "green", "lightblue", "white", "yellow", "red"]
-                nodes = [-1, -0.75, -0.5, 0, 0.5, 1]
-                cmap = plt.cm.colors.LinearSegmentedColormap.from_list(
-                    "custom", list(zip(np.linspace(0, 1, len(nodes)), colors))
-                )
-
-                # Plot the base grid
-                plt.imshow(
-                    grid,
-                    cmap=cmap,
-                    interpolation="nearest",
-                    vmin=-1,
-                    vmax=1,
-                    origin="upper",
-                )
-
-                # Overlay visited treasures
-                visited_mask = visited_grid != 0
-                if visited_mask.any():
-                    plt.imshow(
-                        np.ma.masked_where(~visited_mask, visited_grid),
-                        cmap=plt.cm.Greys,
-                        interpolation="nearest",
-                        alpha=0.7,
-                        vmin=-1,
-                        vmax=1,
-                        origin="upper",
-                    )
-
-                # Add reward values as text for all treasures (both visited and unvisited)
-                for i, (rx, ry, rr) in enumerate(
-                    zip(
-                        env_info["rx"][env_idx],
-                        env_info["ry"][env_idx],
-                        env_info["rr"][env_idx],
-                    )
-                ):
-                    plt.text(
-                        rx,
-                        ry - 0.2,  # Slightly above the cell
-                        f"{rr:.2f}",
-                        ha="center",
-                        va="bottom",
-                        fontsize=8,
-                        color="black",
-                        bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
-                    )
-
-                # Add text
-                current_ret = float(ret[t, 0]) if t < len(ret) else float(ret[-1, 0])
-                current_trial = int(episode_ids[env_idx, t].cpu().item())
-                action = int(actions[env_idx, t].cpu().item())
-                plt.title(
-                    f"Step: {t}, Return: {current_ret:.2f}, Trial: {current_trial}\n"
-                    f"Action: {ACTION_MAP[action]} ({action}), Pos: ({x}, {y})"
-                )
-
-                # Save figure to buffer
-                buf = BytesIO()
-                plt.savefig(buf, format="png", bbox_inches="tight")
-                buf.seek(0)
-
-                # Read image from buffer
-                frame = imageio.imread(buf)
-                frames.append(frame)
-
-                # Cleanup
-                plt.close()
-                buf.close()
-
-            video_time = time.time() - video_start
-            log(f"Video generation time: {video_time:.2f} seconds", color="green")
-
-            # Save video
-            video_path = (
-                Path(self.cfg.exp_dir)
-                / "eval_rollouts"
-                / f"rollout_{env_idx}_{self.current_epoch}.mp4"
-            )
-            video_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                imageio.mimsave(str(video_path), frames, fps=5)
-                log(f"Saved rollout animation to {video_path}", color="green")
-
-                # Log to wandb
-                self.log_to_wandb(
-                    {f"rollout_{env_idx}": wandb.Video(str(video_path))},
-                    prefix="plots/",
-                )
-            except Exception as e:
-                log(f"Failed to save video: {str(e)}", color="red")
+        if self.wandb_run is not None:
+            self.wandb_run.log({"eval/trajectories": render_videos})
+        return render_videos
 
     def eval(self):
         log(
