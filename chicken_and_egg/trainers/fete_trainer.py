@@ -49,7 +49,7 @@ class FETETrainer(BaseTrainer):
         mask = context["mask"]
         timesteps = context["timesteps"]
         episode_ids = context["episode_ids"]
-        infos = context["infos"]
+        infos = context["infos"].copy()  # Create a copy to avoid modifying the original
 
         if trial_id == 0:
             reset_task = True
@@ -62,6 +62,7 @@ class FETETrainer(BaseTrainer):
         # add the new observations to the context
         observations_context = torch.roll(observations_context, shifts=-1, dims=1)
         observations_context[:, -1] = obs
+        
         # roll mask
         mask = torch.roll(mask, shifts=-1, dims=1)
         mask[:, -1] = 1
@@ -79,10 +80,11 @@ class FETETrainer(BaseTrainer):
         actions_context = torch.roll(actions_context, shifts=-1, dims=1)
         infos.append(info)
 
-        behavior_entropy = []
-        successor_entropy = []
+        # Initialize lists to store entropy values across timesteps
+        behavior_entropies = []
+        successor_entropies = []
 
-        action_loss = torch.zeros(env.num_envs, 1).to(self.device)
+        action_loss = 0.0  # Initialize as scalar for proper accumulation
         ep_ret = torch.zeros(env.num_envs, 1).to(self.device)
 
         for ts in range(self.cfg.env.timesteps_per_episode):
@@ -100,27 +102,37 @@ class FETETrainer(BaseTrainer):
             # don't update the behavior policy, see paper
             with torch.no_grad():
                 behavior_logits = self.model(
-                    **policy_kwargs, policy_type=f"{policy_type}_behavior"
+                    **policy_kwargs, policy_type=f"{policy_type}_roll"
                 )
 
             # [N, T, A]
             successor_logits = self.model(
-                **policy_kwargs, policy_type=f"{policy_type}_successor"
+                **policy_kwargs, policy_type=f"{policy_type}_pred"
             )
 
             # compute entropy of logits
-            successor_entropy = compute_entropy(successor_logits)
-            successor_entropy = successor_entropy.sum(dim=-1)
+            current_successor_entropy = compute_entropy(successor_logits)
+            current_successor_entropy = current_successor_entropy.sum(dim=-1)
+            successor_entropies.append(current_successor_entropy)
 
             # compute entropy of behavior logits
-            behavior_entropy = compute_entropy(behavior_logits)
-            behavior_entropy = behavior_entropy.sum(dim=-1)
+            current_behavior_entropy = compute_entropy(behavior_logits)
+            current_behavior_entropy = current_behavior_entropy.sum(dim=-1)
+            behavior_entropies.append(current_behavior_entropy)
 
             # compute hadamard product of logits
             logits = behavior_logits * successor_logits
 
             # compute loss for current timestep
             logits_t = logits[:, -1]
+            
+            # Apply temperature scaling
+            if sample_actions:
+                temperature = self.cfg.temperature if hasattr(self.cfg, 'temperature') else 1.0
+                if "exploit" in policy_type:
+                    temperature = temperature * 0.1  # Lower temperature for exploit
+                logits_t = logits_t / temperature
+            
             # apply softmax to get a valid distribution
             logits_softmaxed = F.softmax(logits_t, dim=-1)
 
@@ -131,7 +143,8 @@ class FETETrainer(BaseTrainer):
                 action_t = torch.argmax(logits_t, dim=-1)
 
             # cross entropy loss
-            action_loss += F.cross_entropy(logits_t, action_t, reduction="mean")
+            current_loss = F.cross_entropy(logits_t, action_t, reduction="mean")
+            action_loss += current_loss
 
             next_state, reward, done, terminal, info = env.step(to_numpy(action_t))
 
@@ -141,43 +154,39 @@ class FETETrainer(BaseTrainer):
 
             reward = torch.from_numpy(reward).to(self.device).unsqueeze(-1).float()
 
-            # update context by appending new state, reward and action
-
-            # if its the last timestep, don't append the next state
-            if ts < self.cfg.env.timesteps_per_episode - 1:
-                observations_context = torch.roll(
-                    observations_context, shifts=-1, dims=1
-                )
-                observations_context[:, -1] = next_state
-                mask = torch.roll(mask, shifts=-1, dims=1)
-                mask[:, -1] = 1
-
-                # add the trial id to the context
-                trial_id_tensor = torch.tensor(trial_id).long()
-                trial_id_tensor = einops.repeat(
-                    trial_id_tensor, " -> b", b=env.num_envs
-                ).to(self.device)
-                episode_ids = torch.roll(episode_ids, shifts=-1, dims=1)
-                episode_ids[:, -1] = trial_id_tensor
-                timesteps = torch.roll(timesteps, shifts=-1, dims=1)
-                timesteps[:, -1] = ts + 1
-                infos.append(info)
-                # apply roll here is to account for the
-                # first observation which doesn't have an associated reward / action
-                rewards_context[:, -1] = reward
-                rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
-                actions_context[:, -1] = action_t
-                actions_context = torch.roll(actions_context, shifts=-1, dims=1)
-            else:
-                # just insert action and reward
-                rewards_context[:, -1] = reward
-                actions_context[:, -1] = action_t
-
+            # Store current action and reward before rolling for next timestep
+            actions_context[:, -1] = action_t
+            rewards_context[:, -1] = reward
+            
             ep_ret += reward
 
             # assumes all envs finish at the same time
             if done.all():
                 break
+
+            # update context by appending new state, reward and action
+            observations_context = torch.roll(observations_context, shifts=-1, dims=1)
+            observations_context[:, -1] = next_state
+            
+            mask = torch.roll(mask, shifts=-1, dims=1)
+            mask[:, -1] = 1
+
+            # add the trial id to the context
+            episode_ids = torch.roll(episode_ids, shifts=-1, dims=1)
+            episode_ids[:, -1] = trial_id
+            
+            timesteps = torch.roll(timesteps, shifts=-1, dims=1)
+            timesteps[:, -1] = ts + 1
+            
+            # Roll actions and rewards AFTER setting their values
+            actions_context = torch.roll(actions_context, shifts=-1, dims=1)
+            rewards_context = torch.roll(rewards_context, shifts=-1, dims=1)
+            
+            infos.append(info)
+
+        # Calculate mean entropies across all timesteps
+        successor_entropy_mean = torch.cat(successor_entropies).mean().item()
+        behavior_entropy_mean = torch.cat(behavior_entropies).mean().item()
 
         new_context = {
             "observations": observations_context,
@@ -190,13 +199,15 @@ class FETETrainer(BaseTrainer):
         }
 
         episode_metrics = {
-            "successor_entropy": successor_entropy.mean().item(),
-            "behavior_entropy": behavior_entropy.mean().item(),
+            "successor_entropy": successor_entropy_mean,
+            "behavior_entropy": behavior_entropy_mean,
             "ep_ret": ep_ret.mean().item(),
         }
 
-        # average loss across the environments
-        action_loss /= env.num_envs
+        # Normalize by both timesteps and environments
+        num_timesteps = min(self.cfg.env.timesteps_per_episode, ts + 1)
+        action_loss /= (num_timesteps * env.num_envs)
+        
         return ep_ret, action_loss, new_context, episode_metrics
 
     def _init_context(self, batch_size: int = 1):
@@ -253,6 +264,8 @@ class FETETrainer(BaseTrainer):
             policy_context = self._init_context(self.cfg.num_train_envs)
 
             trial_metrics = []
+            best_r_history = []  # Track best_r over time
+            best_r_diffs = []    # Track improvements in best_r
 
             # If we want N episodes, we need to rollout N-1 explore / exploit pairs.
             for trial_id in range(self.cfg.num_episodes - 1):
@@ -279,26 +292,43 @@ class FETETrainer(BaseTrainer):
                     sample_actions=True,
                 )
 
+                # Calculate best_r improvement
+                old_best_r = best_r.clone()
+                best_r = torch.max(best_r, r_exploit)
+                best_r_diff = best_r - old_best_r
+                
+                # Store metrics
+                best_r_history.append(best_r.mean().item())
+                best_r_diffs.append(best_r_diff.mean().item())
+
                 # exploit trial is 'informative'
                 # good exploit trials meet or surpass previous exploit returns in the
                 # meta-rollout sequence
                 # train the explot policy here
-                mask = r_exploit >= best_r
+                mask = r_exploit >= old_best_r
+                mask2 = r_exploit > old_best_r
+                
+                if self.cfg.weighting:
+                    mask = mask * (1 + r_exploit - old_best_r)
+                    mask2 = mask2 * (1 + r_exploit - old_best_r)
+                
                 total_loss += l_exploit * mask
                 exploit_loss += l_exploit * mask
-
-                # explore trial is 'maximal'
-                # good explore trials are followed by the exploit policy achieving
-                # higher trial returns than those seen so far
-                # train the explore policy here
-                mask2 = r_exploit > best_r
                 total_loss += l_explore * mask2
                 explore_loss += l_explore * mask2
 
-                # update the baseline return
-                best_r = torch.max(best_r, r_exploit)
-
-                trial_metrics.append(episode_metrics)
+                # Log detailed metrics for this trial
+                trial_metrics.append({
+                    **episode_metrics,
+                    "explore_return": r_explore.mean().item(),
+                    "exploit_return": r_exploit.mean().item(),
+                    "best_r": best_r.mean().item(),
+                    "best_r_diff": best_r_diff.mean().item(),
+                    "explore_loss": l_explore.mean().item(),
+                    "exploit_loss": l_exploit.mean().item(),
+                    "mask_mean": mask.float().mean().item(),
+                    "mask2_mean": mask2.float().mean().item(),
+                })
 
         # average loss over number of environments
         total_loss = total_loss.mean()
@@ -319,18 +349,28 @@ class FETETrainer(BaseTrainer):
         metrics["time/update"] = time.time() - update_time
         metrics["lr"] = self.scheduler.get_last_lr()[0]
 
-        # compute metrics for each trial
-        for k, v in trial_metrics[0].items():
-            metrics[f"{k}_trial"] = np.mean([t[k] for t in trial_metrics])
+        # Log per-trial metrics
+        for i, trial_metric in enumerate(trial_metrics):
+            for k, v in trial_metric.items():
+                metrics[f"ttrain_{k}/trial{i}"] = v
 
-        train_metrics = {
-            "loss": total_loss.item(),
-            "explore_loss": explore_loss.item(),
-            "exploit_loss": exploit_loss.item(),
-            "best_r": best_r.mean().item(),
-            **metrics,
-        }
-        return train_metrics
+        # Log best_r history and diffs
+        for i, (best_r_val, best_r_diff) in enumerate(zip(best_r_history, best_r_diffs)):
+            metrics[f"ttrain_best_r_history/trial{i}"] = best_r_val
+            metrics[f"ttrain_best_r_diffs/trial{i}"] = best_r_diff
+
+        # Log summary statistics
+        metrics.update({
+            "train/loss": total_loss.item(),
+            "train/explore_loss": explore_loss.item(),
+            "train/exploit_loss": exploit_loss.item(),
+            "train/final_best_r": best_r.mean().item(),
+            "train/mean_best_r_diff": np.mean(best_r_diffs),
+            "train/max_best_r_diff": np.max(best_r_diffs),
+            "train/num_improvements": sum(1 for diff in best_r_diffs if diff > 0),
+        })
+
+        return metrics
 
     def _generate_plots(self, policy_context):
         if self.cfg.env.env_name == "bandit":
@@ -354,7 +394,8 @@ class FETETrainer(BaseTrainer):
             self.log_to_wandb({"ep_ret": wandb.Image(plt)}, prefix="plots/")
             plt.close()
         elif self.cfg.env.env_name == "darkroom":
-            self._visualize_return(policy_context)
+            pass
+            # self._visualize_return(policy_context)
             # self._visualize_darkroom_traj(policy_context)
 
     def _visualize_return(self, policy_context):
@@ -475,7 +516,7 @@ class FETETrainer(BaseTrainer):
 
             train_metrics["time/trial_time"] = trial_end - trial_start
             train_metrics["time/fps"] = fps
-            self.log_to_wandb(train_metrics, prefix="train/")
+            self.log_to_wandb(train_metrics, prefix="")
             self.log_to_wandb({"_update": self.current_epoch}, prefix="step/")
 
             if self.current_epoch % self.cfg.eval_every == 0:
@@ -485,7 +526,7 @@ class FETETrainer(BaseTrainer):
                     wandb.log(eval_metrics)
 
                 log(
-                    f"E {self.current_epoch}, T {total_timesteps}, FPS {fps:.2f}: Train Loss = {train_metrics['loss']:.4f}, Eval Mean Ep Ret = {eval_metrics['eval/mean_ep_ret']:.4f}, Eval Std Ep Ret = {eval_metrics['eval/std_ep_ret']:.4f}",
+                    f"E {self.current_epoch}, T {total_timesteps}, FPS {fps:.2f}: Train Loss = {train_metrics['train/loss']:.4f}, Eval Mean Ep Ret = {eval_metrics['eval/mean_ep_ret']:.4f}, Eval Std Ep Ret = {eval_metrics['eval/std_ep_ret']:.4f}",
                     color="blue",
                 )
 
