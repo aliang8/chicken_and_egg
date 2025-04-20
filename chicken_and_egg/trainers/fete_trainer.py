@@ -316,11 +316,15 @@ class FETETrainer(BaseTrainer):
                 best_r_history.append(best_r.mean().item())
                 best_r_diffs.append(best_r_diff.mean().item())
 
-                # Apply losses with separate masks
-                total_loss += l_exploit * mask_exploit
-                exploit_loss += l_exploit * mask_exploit
-                total_loss += l_explore * mask_explore
-                explore_loss += l_explore * mask_explore
+                # Weight the losses by the masks
+                # Only train the successor policy, behavior policy is just for sampling
+                weighted_exploit_loss = l_exploit * mask_exploit
+                weighted_explore_loss = l_explore * mask_explore
+
+                # Accumulate losses
+                total_loss += weighted_exploit_loss + weighted_explore_loss
+                exploit_loss += weighted_exploit_loss
+                explore_loss += weighted_explore_loss
 
                 # Log detailed metrics for this trial
                 trial_metrics.append({
@@ -333,6 +337,8 @@ class FETETrainer(BaseTrainer):
                     "exploit_loss": l_exploit.mean().item(),
                     "mask_exploit_mean": mask_exploit.float().mean().item(),
                     "mask_explore_mean": mask_explore.float().mean().item(),
+                    "weighted_exploit_loss": weighted_exploit_loss.mean().item(),
+                    "weighted_explore_loss": weighted_explore_loss.mean().item(),
                 })
 
         # average loss over number of environments
