@@ -126,19 +126,12 @@ class FETETrainer(BaseTrainer):
             # compute loss for current timestep
             logits_t = logits[:, -1]
             
-            # Apply temperature scaling with proper gradient handling
+            # Apply temperature scaling
             if sample_actions:
-                # Get base temperature
-                base_temperature = self.cfg.eval_temperature if not self.model.training else self.cfg.temperature
-                
-                # Apply different temperatures for explore vs exploit
+                temperature = self.cfg.eval_temperature if not self.model.training else self.cfg.temperature
                 if "exploit" in policy_type:
-                    temperature = base_temperature * self.cfg.exploit_temperature_ratio
-                else:
-                    temperature = base_temperature
-                
-                # Scale logits for sampling but maintain gradients for learning
-                logits_t = logits_t * temperature
+                    temperature = temperature * 0.5  # Lower temperature for exploit
+                logits_t = logits_t / temperature
             
             # apply softmax to get a valid distribution
             logits_softmaxed = F.softmax(logits_t, dim=-1)
@@ -299,13 +292,10 @@ class FETETrainer(BaseTrainer):
                     sample_actions=True,
                 )
 
-                # Calculate separate masks for exploration and exploitation
-                mask_exploit = r_exploit >= best_r
-                mask_explore = r_exploit > best_r  # Note: strictly greater than
-                
+                # Calculate masks based on current state rewards
+                mask = r_exploit >= best_r
                 if self.cfg.weighting:
-                    mask_exploit = mask_exploit * (1 + r_exploit - best_r)
-                    mask_explore = mask_explore * (1 + r_exploit - best_r)
+                    mask = mask * (1 + r_exploit - best_r)
                 
                 # Update best_r and track improvement
                 prev_best_r = best_r.clone()
@@ -316,15 +306,11 @@ class FETETrainer(BaseTrainer):
                 best_r_history.append(best_r.mean().item())
                 best_r_diffs.append(best_r_diff.mean().item())
 
-                # Weight the losses by the masks
-                # Only train the successor policy, behavior policy is just for sampling
-                weighted_exploit_loss = l_exploit * mask_exploit
-                weighted_explore_loss = l_explore * mask_explore
-
-                # Accumulate losses
-                total_loss += weighted_exploit_loss + weighted_explore_loss
-                exploit_loss += weighted_exploit_loss
-                explore_loss += weighted_explore_loss
+                # Apply losses
+                total_loss += l_exploit * mask
+                exploit_loss += l_exploit * mask
+                total_loss += l_explore * mask
+                explore_loss += l_explore * mask
 
                 # Log detailed metrics for this trial
                 trial_metrics.append({
@@ -335,10 +321,7 @@ class FETETrainer(BaseTrainer):
                     "best_r_diff": best_r_diff.mean().item(),
                     "explore_loss": l_explore.mean().item(),
                     "exploit_loss": l_exploit.mean().item(),
-                    "mask_exploit_mean": mask_exploit.float().mean().item(),
-                    "mask_explore_mean": mask_explore.float().mean().item(),
-                    "weighted_exploit_loss": weighted_exploit_loss.mean().item(),
-                    "weighted_explore_loss": weighted_explore_loss.mean().item(),
+                    "mask_mean": mask.float().mean().item(),
                 })
 
         # average loss over number of environments
