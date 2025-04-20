@@ -1,13 +1,22 @@
 name: fete 
 hp_name: ${name}-${env.hp_name}_s-${seed}
 
-update_behavior_every: 100 # in terms of episodes
+update_behavior_every: 50 # in terms of episodes
 num_episodes: ${env.num_episodes}
 
 weighting: True
+temperature: 1.0  # For training
+eval_temperature: 10.0  # For evaluation
+exploit_temperature_ratio: 0.5  # Ratio to multiply base temperature by for exploit policy
 
 defaults:
   - base
   - override model: fete_gpt2
   - override env: bandit
   - _self_
+
+model:
+  env:
+    timesteps_per_episode: ${env.timesteps_per_episode}
+    obs_dim: ${env.obs_dim}
+    act_dim: ${env.act_dim}

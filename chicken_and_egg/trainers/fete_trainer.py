@@ -120,18 +120,25 @@ class FETETrainer(BaseTrainer):
             current_behavior_entropy = current_behavior_entropy.sum(dim=-1)
             behavior_entropies.append(current_behavior_entropy)
 
-            # compute hadamard product of logits
-            logits = behavior_logits * successor_logits
+            # Add logits instead of multiplying (since they're in log space)
+            logits = behavior_logits + successor_logits
 
             # compute loss for current timestep
             logits_t = logits[:, -1]
             
-            # Apply temperature scaling
+            # Apply temperature scaling with proper gradient handling
             if sample_actions:
-                temperature = self.cfg.temperature if hasattr(self.cfg, 'temperature') else 1.0
+                # Get base temperature
+                base_temperature = self.cfg.eval_temperature if not self.model.training else self.cfg.temperature
+                
+                # Apply different temperatures for explore vs exploit
                 if "exploit" in policy_type:
-                    temperature = temperature * 0.1  # Lower temperature for exploit
-                logits_t = logits_t / temperature
+                    temperature = base_temperature * self.cfg.exploit_temperature_ratio
+                else:
+                    temperature = base_temperature
+                
+                # Scale logits for sampling but maintain gradients for learning
+                logits_t = logits_t * temperature
             
             # apply softmax to get a valid distribution
             logits_softmaxed = F.softmax(logits_t, dim=-1)
@@ -292,30 +299,28 @@ class FETETrainer(BaseTrainer):
                     sample_actions=True,
                 )
 
-                # Calculate best_r improvement
-                old_best_r = best_r.clone()
+                # Calculate separate masks for exploration and exploitation
+                mask_exploit = r_exploit >= best_r
+                mask_explore = r_exploit > best_r  # Note: strictly greater than
+                
+                if self.cfg.weighting:
+                    mask_exploit = mask_exploit * (1 + r_exploit - best_r)
+                    mask_explore = mask_explore * (1 + r_exploit - best_r)
+                
+                # Update best_r and track improvement
+                prev_best_r = best_r.clone()
                 best_r = torch.max(best_r, r_exploit)
-                best_r_diff = best_r - old_best_r
+                best_r_diff = best_r - prev_best_r
                 
                 # Store metrics
                 best_r_history.append(best_r.mean().item())
                 best_r_diffs.append(best_r_diff.mean().item())
 
-                # exploit trial is 'informative'
-                # good exploit trials meet or surpass previous exploit returns in the
-                # meta-rollout sequence
-                # train the explot policy here
-                mask = r_exploit >= old_best_r
-                mask2 = r_exploit > old_best_r
-                
-                if self.cfg.weighting:
-                    mask = mask * (1 + r_exploit - old_best_r)
-                    mask2 = mask2 * (1 + r_exploit - old_best_r)
-                
-                total_loss += l_exploit * mask
-                exploit_loss += l_exploit * mask
-                total_loss += l_explore * mask2
-                explore_loss += l_explore * mask2
+                # Apply losses with separate masks
+                total_loss += l_exploit * mask_exploit
+                exploit_loss += l_exploit * mask_exploit
+                total_loss += l_explore * mask_explore
+                explore_loss += l_explore * mask_explore
 
                 # Log detailed metrics for this trial
                 trial_metrics.append({
@@ -326,8 +331,8 @@ class FETETrainer(BaseTrainer):
                     "best_r_diff": best_r_diff.mean().item(),
                     "explore_loss": l_explore.mean().item(),
                     "exploit_loss": l_exploit.mean().item(),
-                    "mask_mean": mask.float().mean().item(),
-                    "mask2_mean": mask2.float().mean().item(),
+                    "mask_exploit_mean": mask_exploit.float().mean().item(),
+                    "mask_explore_mean": mask_explore.float().mean().item(),
                 })
 
         # average loss over number of environments

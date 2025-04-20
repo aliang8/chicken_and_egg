@@ -140,13 +140,28 @@ class FETE(BaseModel):
 
         # Roll model (behavior policy)
         self.roll_backbone = FETEPolicy(cfg)
-        self.roll_explore_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
-        self.roll_exploit_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
+        self.roll_explore_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
+        self.roll_exploit_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
 
         # Pred model (successor policy)
         self.pred_backbone = FETEPolicy(cfg)
-        self.pred_explore_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
-        self.pred_exploit_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
+        self.pred_explore_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
+        self.pred_exploit_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
+
+        # Initialize cache
+        self.cache_len = (cfg.num_episodes + 1) * (cfg.env.timesteps_per_episode + 1)
+        self._init_cache()
+
+    def _init_cache(self):
+        """Initialize the cache for autoregressive sampling"""
+        self.cache = {
+            "observations": torch.zeros(1, self.cache_len, self.cfg.env.obs_dim),
+            "rewards": torch.zeros(1, self.cache_len, 1),
+            "actions": torch.zeros(1, self.cache_len, 1),
+            "timesteps": torch.zeros(1, self.cache_len, dtype=torch.long),
+            "episode_ids": torch.zeros(1, self.cache_len, dtype=torch.long),
+            "mask": torch.zeros(1, self.cache_len),
+        }
 
     def update_behavior_policy(self):
         # copy weights from pred to roll
