@@ -173,22 +173,36 @@ class FETE(BaseModel):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
 
-        self.policy_backbone = FETEPolicy(cfg)
+        # Roll model (behavior policy)
+        self.roll_backbone = FETEPolicy(cfg)
+        self.roll_explore_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
+        self.roll_exploit_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
 
-        # Explore and exploit share the same backbone but different output heads
-        self.explore_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
-        self.exploit_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
+        # Pred model (successor policy)
+        self.pred_backbone = FETEPolicy(cfg)
+        self.pred_explore_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
+        self.pred_exploit_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
 
-        self.successor_backbone = FETEPolicy(cfg)
+        # Initialize cache
+        self.cache_len = (cfg.num_episodes + 1) * (cfg.env.timesteps_per_episode + 1)
+        self._init_cache()
 
-        self.successor_explore_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
-        self.successor_exploit_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
+    def _init_cache(self):
+        """Initialize the cache for autoregressive sampling"""
+        self.cache = {
+            "observations": torch.zeros(1, self.cache_len, self.cfg.env.obs_dim),
+            "rewards": torch.zeros(1, self.cache_len, 1),
+            "actions": torch.zeros(1, self.cache_len, 1),
+            "timesteps": torch.zeros(1, self.cache_len, dtype=torch.long),
+            "episode_ids": torch.zeros(1, self.cache_len, dtype=torch.long),
+            "mask": torch.zeros(1, self.cache_len),
+        }
 
     def update_behavior_policy(self):
-        # copy weights from successor to behavior
-        self._copy_params(self.successor_backbone, self.policy_backbone)
-        self._copy_params(self.successor_explore_head, self.explore_head)
-        self._copy_params(self.successor_exploit_head, self.exploit_head)
+        # copy weights from pred to roll
+        self._copy_params(self.pred_backbone, self.roll_backbone)
+        self._copy_params(self.pred_explore_head, self.roll_explore_head)
+        self._copy_params(self.pred_exploit_head, self.roll_exploit_head)
 
     def _copy_params(self, src_policy, dst_policy):
         for param, successor_param in zip(
@@ -205,22 +219,32 @@ class FETE(BaseModel):
         timesteps: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         trial_ids: Optional[torch.Tensor] = None,
-        policy_type: str = "explore_behavior",
+        policy_type: str = "explore_roll",
         **kwargs,
     ):
-        if policy_type == "explore_behavior":
-            head = self.explore_head
-        elif policy_type == "explore_successor":
-            head = self.successor_explore_head
-        elif policy_type == "exploit_behavior":
-            head = self.exploit_head
-        elif policy_type == "exploit_successor":
-            head = self.successor_exploit_head
+        # Initialize backbone and head to None
+        backbone = None
+        head = None
 
-        if "behavior" in policy_type:
-            backbone = self.policy_backbone
-        elif "successor" in policy_type:
-            backbone = self.successor_backbone
+        # Determine which backbone and head to use based on policy_type
+        if policy_type == "explore_roll":
+            backbone = self.roll_backbone
+            head = self.roll_explore_head
+        elif policy_type == "explore_pred":
+            backbone = self.pred_backbone
+            head = self.pred_explore_head
+        elif policy_type == "exploit_roll":
+            backbone = self.roll_backbone
+            head = self.roll_exploit_head
+        elif policy_type == "exploit_pred":
+            backbone = self.pred_backbone
+            head = self.pred_exploit_head
+        else:
+            raise ValueError(f"Invalid policy_type: {policy_type}")
+
+        # Ensure backbone and head are defined
+        if backbone is None or head is None:
+            raise ValueError(f"Failed to initialize backbone or head for policy_type: {policy_type}")
 
         output = backbone(
             observations=observations,
