@@ -41,7 +41,7 @@ class FETETrainer(BaseTrainer):
             ep_ret: float
             action_loss: float
             context: Dict[str, torch.Tensor], [N, T, ...]
-        """
+        """        
         # for exploitation, use the context from the exploration policy
         observations_context = context["observations"]
         rewards_context = context["rewards"]
@@ -93,7 +93,8 @@ class FETETrainer(BaseTrainer):
                 "actions": actions_context,
                 "rewards": rewards_context,
                 "timesteps": timesteps,
-                "attention_mask": ~mask.bool(),  # be careful here 1 means we mask and 0 means we attend
+                # "attention_mask": ~mask.bool(),  # be careful here 1 means we mask and 0 means we attend
+                "attention_mask": mask,
                 "episode_ids": episode_ids,
             }
 
@@ -117,6 +118,7 @@ class FETETrainer(BaseTrainer):
             behavior_entropy = behavior_entropy.sum(dim=-1)
 
             # compute hadamard product of logits
+            # TODO: adding logits
             logits = behavior_logits * successor_logits
 
             # compute loss for current timestep
@@ -283,7 +285,11 @@ class FETETrainer(BaseTrainer):
                 # good exploit trials meet or surpass previous exploit returns in the
                 # meta-rollout sequence
                 # train the explot policy here
-                mask = r_exploit >= best_r
+                if self.cfg.weighting:
+                    mask = (1 + r_exploit - best_r).detach()
+                else:
+                    mask = r_exploit >= best_r
+
                 total_loss += l_exploit * mask
                 exploit_loss += l_exploit * mask
 
@@ -291,13 +297,16 @@ class FETETrainer(BaseTrainer):
                 # good explore trials are followed by the exploit policy achieving
                 # higher trial returns than those seen so far
                 # train the explore policy here
-                mask2 = r_exploit > best_r
+                if self.cfg.weighting:
+                    mask2 = (1 + r_explore - best_r).detach()
+                else:
+                    mask2 = r_explore > best_r
+
                 total_loss += l_explore * mask2
                 explore_loss += l_explore * mask2
 
                 # update the baseline return
                 best_r = torch.max(best_r, r_exploit)
-
                 trial_metrics.append(episode_metrics)
 
         # average loss over number of environments
@@ -354,8 +363,25 @@ class FETETrainer(BaseTrainer):
             self.log_to_wandb({"ep_ret": wandb.Image(plt)}, prefix="plots/")
             plt.close()
         elif self.cfg.env.env_name == "darkroom":
-            self._visualize_return(policy_context)
+            # self._visualize_return(policy_context)
+            self._visualize_coverage_map(policy_context)
             # self._visualize_darkroom_traj(policy_context)
+
+    def _visualize_coverage_map(self, policy_context):
+        from cae_commons.viz.darkroom import visualize_coverage_map
+
+        videos = visualize_coverage_map(policy_context, self.cfg.num_eval_rollouts_save)
+        render_videos = []
+        for i, video in enumerate(videos):
+            video = np.array(video)
+            video = video.transpose(0, 3, 1, 2)  # HWC -> CHW
+            render_videos.append(
+                wandb.Video(video, caption=f"Eval Rollout {i}", fps=10, format="mp4")
+            )
+
+        if self.wandb_run is not None:
+            self.wandb_run.log({"eval/coverage_maps": render_videos})
+        return render_videos
 
     def _visualize_return(self, policy_context):
         from cae_commons.viz.darkroom import visualize_return

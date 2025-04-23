@@ -2,9 +2,12 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from chicken_and_egg.models.base import BaseModel
+import transformers
+from chicken_and_egg.models.trajectory_gpt2 import GPT2Model
 
 
 class TransformerBlock(nn.Module):
@@ -31,7 +34,8 @@ class TransformerBlock(nn.Module):
         # Self attention
         residual = x
         x = self.ln_1(x)
-        x, _ = self.attn(x, x, x, key_padding_mask=attention_mask)
+        # x, weights = self.attn(x, x, x, key_padding_mask=attention_mask, attn_mask=attention_mask)
+        x, _ = self.attn(x, x, x, attn_mask=attention_mask)
         x = residual + x
 
         # MLP
@@ -77,15 +81,33 @@ class TransformerModel(nn.Module):
 class FETEPolicy(BaseModel):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
+        self.cfg = cfg
 
         # Embedding layers
         self.embed_reward = nn.Linear(1, cfg.hidden_dim)
         self.embed_action = nn.Linear(1, cfg.hidden_dim)
+        # self.embed_action = nn.Linear(cfg.act_dim, cfg.hidden_dim)
         self.embed_observation = nn.Linear(cfg.obs_dim, cfg.hidden_dim)
         self.embed_trial_id = nn.Embedding(cfg.num_episodes + 1, cfg.hidden_dim)
 
         # GPT-style transformer model
-        self.transformer = TransformerModel(cfg)
+        # self.transformer = TransformerModel(cfg)
+
+        self.positional_encodings = nn.Embedding(cfg.max_seq_len, cfg.hidden_dim)
+
+        config = transformers.GPT2Config(
+            vocab_size=1,  # doesn't matter -- we don't use the vocab
+            n_embd=cfg.hidden_dim,
+            n_head=cfg.n_head,
+            n_layer=cfg.num_layers,
+            dropout=cfg.dropout,
+            n_ctx=cfg.max_seq_len,
+        )
+
+        # note: the only difference between this GPT2Model and the default Huggingface version
+        # is that the positional embeddings are removed (since we'll add those ourselves)
+        self.transformer = GPT2Model(config)
+
         self.ln = nn.LayerNorm(cfg.hidden_dim)
 
     def forward(
@@ -110,6 +132,10 @@ class FETEPolicy(BaseModel):
         # Embed inputs
         obs_embeds = self.embed_observation(observations)
         rew_embeds = self.embed_reward(rewards)
+
+        # convert actions to one-hot
+        # actions = F.one_hot(actions.long(), num_classes=self.cfg.act_dim).squeeze()
+        # act_embeds = self.embed_action(actions.float())
         act_embeds = self.embed_action(actions)
 
         # Combine embeddings
@@ -120,12 +146,21 @@ class FETEPolicy(BaseModel):
             trial_id_embeds = self.embed_trial_id(trial_ids)
             embeddings = embeddings + trial_id_embeds
 
-        # Pass through transformer
+        if timesteps is not None:
+            timestep_embeds = self.positional_encodings(timesteps)
+            embeddings = embeddings + timestep_embeds
+
+        # # Pass through transformer
+        # output = self.transformer(
+        #     input_embeds=embeddings,
+        #     timesteps=timesteps,
+        #     attention_mask=attention_mask,
+        # )
         output = self.transformer(
-            input_embeds=embeddings,
-            timesteps=timesteps,
+            inputs_embeds=embeddings,
             attention_mask=attention_mask,
         )
+        output = output.last_hidden_state
 
         return output
 
