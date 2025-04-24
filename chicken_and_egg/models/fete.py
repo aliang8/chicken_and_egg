@@ -116,7 +116,7 @@ class FETEPolicy(BaseModel):
         actions: torch.Tensor,
         rewards: torch.Tensor,
         timesteps: torch.Tensor,
-        trial_ids: Optional[torch.Tensor] = None,
+        episode_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ):
         """
@@ -140,15 +140,23 @@ class FETEPolicy(BaseModel):
 
         # Combine embeddings
         embeddings = rew_embeds + act_embeds + obs_embeds
-        embeddings = self.ln(embeddings)
 
-        if trial_ids is not None:
-            trial_id_embeds = self.embed_trial_id(trial_ids)
+        if episode_ids is not None:
+            trial_id_embeds = self.embed_trial_id(episode_ids)
             embeddings = embeddings + trial_id_embeds
+        else:
+            import ipdb; ipdb.set_trace()
 
         if timesteps is not None:
             timestep_embeds = self.positional_encodings(timesteps)
             embeddings = embeddings + timestep_embeds
+        else:
+            import ipdb; ipdb.set_trace()
+
+
+        import ipdb; ipdb.set_trace()
+
+        embeddings = self.ln(embeddings)
 
         # # Pass through transformer
         # output = self.transformer(
@@ -218,7 +226,7 @@ class FETE(BaseModel):
         rewards: torch.Tensor,
         timesteps: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        trial_ids: Optional[torch.Tensor] = None,
+        episode_ids: Optional[torch.Tensor] = None,
         policy_type: str = "explore_roll",
         **kwargs,
     ):
@@ -252,7 +260,7 @@ class FETE(BaseModel):
             rewards=rewards,
             timesteps=timesteps,
             attention_mask=attention_mask,
-            trial_ids=trial_ids,
+            episode_ids=episode_ids,
         )
         output = head(output)
         return output

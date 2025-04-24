@@ -27,7 +27,7 @@ lr_scheduler:
 
 # wandb configurations
 use_wandb: False
-clip_grad_norm: 1.0
+clip_grad_norm: 10.0
 
 # training
 eval_every: 100 # in terms of epochs
