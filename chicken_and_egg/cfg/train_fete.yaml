@@ -1,10 +1,21 @@
 name: fete 
-hp_name: fete_bt-${env.env_name}_s-${seed}
+hp_name: ${name}-${env.hp_name}_s-${seed}
 
-update_behavior_every: 10
+update_behavior_every: 1000 # in terms of trials
+num_episodes: ${env.num_episodes}
+weighting: false
+
+temperature: 1.0  # For training, lower makes more peaky
+eval_temperature: 10.0  # For evaluation, higher makes more uniform
 
 defaults:
   - base
   - override model: fete_gpt2
   - override env: bandit
   - _self_
+
+model:
+  env:
+    timesteps_per_episode: ${env.timesteps_per_episode}
+    obs_dim: ${env.obs_dim}
+    act_dim: ${env.act_dim}

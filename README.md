@@ -27,11 +27,29 @@ wandb:
   project: `your_wandb_project`
 ```
 
-## Running FETE training
+## Training
 
 To run the training script, use the following command:
 
 ```bash
-python main.py --config-name=train_fete
+# DREAM
+python main.py --config-name=train_dream \
+  env=darkroom \
+  run_id=0000
+
+# FETE
+python main.py --config-name=train_fete \
+  env=darkroom \
+  run_id=0000 \
+  skip_first_eval=True 
+
+
+# FETE with wandb (e.g.)
+
+python main.py --config-name=train_fete   env=darkroom   run_id=0000   skip_first_eval=True  +wandb.name='cae_fete_test' +wandb.notes='N/A' +wandb.tags="" +wandb.group_name="cae" ++use_wandb=True
 ```
+
+
+
+# log entropy of action logits 
 

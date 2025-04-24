@@ -13,3 +13,4 @@ chicken_and_egg/cfg/local/*
 chicken_and_egg/results/*
 chicken_and_egg/home/sunny/chicken_and_egg/results/*
 chicken_and_egg/wandb/*
+chicken_and_egg/logs/*

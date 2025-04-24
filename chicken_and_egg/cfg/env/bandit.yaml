@@ -2,5 +2,12 @@ env_name: bandit_${env.bandit_type}
 env_id: test
 obs_dim: 10
 act_dim: 10
-episode_length: 10
-bandit_type: mean
+timesteps_per_episode: 1
+num_episodes: 10
+bandit_type: reg
+hp_name: bt-${env.bandit_type}
+
+env_kwargs:
+  n: 10
+  noise_scale: 0.5
+  minval: 0.5

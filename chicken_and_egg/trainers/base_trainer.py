@@ -64,22 +64,30 @@ class BaseTrainer:
         # add exp_dir to config
         self.cfg.exp_dir = str(self.exp_dir)
 
+        # set random seeds
+        random.seed(cfg.seed)
+        np.random.seed(cfg.seed)
+        torch.manual_seed(cfg.seed)
+        torch.cuda.manual_seed_all(cfg.seed)
+
+        # Ensure deterministic behavior in CUDA (if applicable)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
         # initialize environments for training and evaluation
         self.train_envs = make_envs(
             env_name=self.cfg.env.env_name,
             num_envs=self.cfg.num_train_envs,
             seed=self.cfg.seed,
+            env_kwargs=self.cfg.env.env_kwargs,
         )
         self.eval_envs = make_envs(
             env_name=self.cfg.env.env_name,
             num_envs=self.cfg.num_eval_envs,
             seed=self.cfg.seed + 10000,
+            env_kwargs=self.cfg.env.env_kwargs,
         )
-
-        # set random seeds
-        random.seed(cfg.seed)
-        np.random.seed(cfg.seed)
-        torch.manual_seed(cfg.seed)
+        log(f"Env: {self.train_envs} {self.cfg.env.env_name}", "yellow")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         log(f"using device: {self.device}")
@@ -162,30 +170,41 @@ class BaseTrainer:
     def setup_model(self):
         pass
 
+    def get_optimizer(self, params, optimizer_cfg: DictConfig):
+        opt_cls = getattr(torch.optim, optimizer_cfg.name)
+        optimizer = opt_cls(params, **optimizer_cfg.params)
+        return optimizer
+
+    def get_scheduler(self, optimizer, scheduler_cfg: DictConfig):
+        scheduler_cls = getattr(torch.optim.lr_scheduler, scheduler_cfg.name)
+        scheduler = scheduler_cls(optimizer, **scheduler_cfg.params)
+        return scheduler
+
     def setup_optimizer_and_scheduler(self):
-        opt_cls = getattr(torch.optim, self.cfg.optimizer.name)
-        optimizer = opt_cls(self.model.parameters(), **self.cfg.optimizer.params)
-        scheduler_cls = getattr(torch.optim.lr_scheduler, self.cfg.lr_scheduler.name)
+        optimizer = self.get_optimizer(self.model.parameters(), self.cfg.optimizer)
 
         log(
             f"using opt: {self.cfg.optimizer.name}, scheduler: {self.cfg.lr_scheduler.name}",
             "yellow",
         )
 
-        # make this a sequential LR scheduler with warmstarts
+        # Calculate warmup steps as a fraction of total updates
+        num_warmup_steps = int(self.cfg.optimizer.warmup_fraction * self.cfg.num_epochs)
+        log(f"Number of warmup steps for model: {num_warmup_steps}", "yellow")
+
+        # Linear warmup scheduler
         warmstart_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
             start_factor=0.001,
             end_factor=1.0,
-            total_iters=self.cfg.optimizer.num_warmup_steps,
+            total_iters=num_warmup_steps,
         )
 
-        scheduler = scheduler_cls(optimizer, **self.cfg.lr_scheduler.params)
-
+        scheduler = self.get_scheduler(optimizer, self.cfg.lr_scheduler)
         scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer,
             [warmstart_scheduler, scheduler],
-            milestones=[self.cfg.optimizer.num_warmup_steps],
+            milestones=[num_warmup_steps],
         )
         return optimizer, scheduler
 

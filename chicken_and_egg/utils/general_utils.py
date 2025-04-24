@@ -3,8 +3,24 @@ from typing import Dict
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
+
+def compute_entropy(logits):
+    """
+    Compute the entropy of a logits tensor.
+
+    Args:
+        logits: Tensor of shape (..., num_classes)
+
+    Returns:
+        Entropy tensor of shape (...), with entropy computed over the last dimension.
+    """
+    probs = F.softmax(logits, dim=-1)
+    log_probs = F.log_softmax(logits, dim=-1)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+    return entropy
 
 def format_dict_keys(dictionary, format_fn):
     """Returns new dict with `format_fn` applied to keys in `dictionary`."""

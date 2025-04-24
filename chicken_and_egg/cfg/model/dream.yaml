@@ -1,0 +1,18 @@
+# Base model settings
+max_seq_len: 50
+dropout: 0.1
+
+# DQN kwargs
+obs_dim: ${env.obs_dim}
+act_dim: ${env.act_dim} 
+hidden_dim: 64
+epsilon: 1.0
+test_epsilon: 0.0
+gamma: 0.99
+id_dim: 5
+penalty: 0.0
+
+trajectory_embedder:
+  obs_dim: ${env.obs_dim}
+  act_dim: ${env.act_dim}
+  hidden_dim: ${model.hidden_dim}

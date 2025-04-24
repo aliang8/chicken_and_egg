@@ -2,9 +2,12 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from chicken_and_egg.models.base import BaseModel
+import transformers
+from chicken_and_egg.models.trajectory_gpt2 import GPT2Model
 
 
 class TransformerBlock(nn.Module):
@@ -31,7 +34,8 @@ class TransformerBlock(nn.Module):
         # Self attention
         residual = x
         x = self.ln_1(x)
-        x, _ = self.attn(x, x, x, key_padding_mask=attention_mask)
+        # x, weights = self.attn(x, x, x, key_padding_mask=attention_mask, attn_mask=attention_mask)
+        x, _ = self.attn(x, x, x, attn_mask=attention_mask)
         x = residual + x
 
         # MLP
@@ -50,15 +54,20 @@ class TransformerModel(nn.Module):
         super().__init__()
         self.cfg = cfg
         # Standard transformer encoder components
-        self.wpe = nn.Embedding(cfg.max_seq_len, cfg.hidden_dim)
+        self.positional_encodings = nn.Embedding(cfg.max_seq_len, cfg.hidden_dim)
         self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList(
             [TransformerBlock(cfg) for _ in range(cfg.num_layers)]
         )
         self.ln_f = nn.LayerNorm(cfg.hidden_dim)
 
-    def forward(self, input_embeds, timesteps, attention_mask=None):
-        position_embeds = self.wpe(timesteps)
+    def forward(
+        self,
+        input_embeds: torch.Tensor,
+        timesteps: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ):
+        position_embeds = self.positional_encodings(timesteps)
         hidden_states = input_embeds + position_embeds
         hidden_states = self.drop(hidden_states)
 
@@ -72,14 +81,34 @@ class TransformerModel(nn.Module):
 class FETEPolicy(BaseModel):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
+        self.cfg = cfg
 
         # Embedding layers
         self.embed_reward = nn.Linear(1, cfg.hidden_dim)
-        self.embed_action = nn.Linear(1, cfg.hidden_dim)
+        # self.embed_action = nn.Linear(1, cfg.hidden_dim)
+        self.embed_action = nn.Embedding(cfg.act_dim, cfg.hidden_dim)
+        # self.embed_action = nn.Linear(cfg.act_dim, cfg.hidden_dim)
         self.embed_observation = nn.Linear(cfg.obs_dim, cfg.hidden_dim)
+        self.embed_trial_id = nn.Embedding(cfg.num_episodes + 1, cfg.hidden_dim)
 
         # GPT-style transformer model
-        self.transformer = TransformerModel(cfg)
+        # self.transformer = TransformerModel(cfg)
+
+        self.positional_encodings = nn.Embedding(cfg.max_seq_len, cfg.hidden_dim)
+
+        config = transformers.GPT2Config(
+            vocab_size=1,  # doesn't matter -- we don't use the vocab
+            n_embd=cfg.hidden_dim,
+            n_head=cfg.n_head,
+            n_layer=cfg.num_layers,
+            dropout=cfg.dropout,
+            n_ctx=cfg.max_seq_len,
+        )
+
+        # note: the only difference between this GPT2Model and the default Huggingface version
+        # is that the positional embeddings are removed (since we'll add those ourselves)
+        self.transformer = GPT2Model(config)
+
         self.ln = nn.LayerNorm(cfg.hidden_dim)
 
     def forward(
@@ -88,6 +117,7 @@ class FETEPolicy(BaseModel):
         actions: torch.Tensor,
         rewards: torch.Tensor,
         timesteps: torch.Tensor,
+        episode_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ):
         """
@@ -103,18 +133,40 @@ class FETEPolicy(BaseModel):
         # Embed inputs
         obs_embeds = self.embed_observation(observations)
         rew_embeds = self.embed_reward(rewards)
-        act_embeds = self.embed_action(actions)
+
+        # convert actions to one-hot
+        # actions = F.one_hot(actions.long(), num_classes=self.cfg.act_dim).squeeze()
+        # act_embeds = self.embed_action(actions.float())
+        act_embeds = self.embed_action(actions.long()).squeeze()
 
         # Combine embeddings
         embeddings = rew_embeds + act_embeds + obs_embeds
+
+        if episode_ids is not None:
+            trial_id_embeds = self.embed_trial_id(episode_ids)
+            embeddings = embeddings + trial_id_embeds
+        else:
+            import ipdb; ipdb.set_trace()
+
+        if timesteps is not None:
+            timestep_embeds = self.positional_encodings(timesteps)
+            embeddings = embeddings + timestep_embeds
+        else:
+            import ipdb; ipdb.set_trace()
+
         embeddings = self.ln(embeddings)
 
-        # Pass through transformer
+        # # Pass through transformer
+        # output = self.transformer(
+        #     input_embeds=embeddings,
+        #     timesteps=timesteps,
+        #     attention_mask=attention_mask,
+        # )
         output = self.transformer(
-            input_embeds=embeddings,
-            timesteps=timesteps,
+            inputs_embeds=embeddings,
             attention_mask=attention_mask,
         )
+        output = output.last_hidden_state
 
         return output
 
@@ -127,29 +179,27 @@ class FETE(BaseModel):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
 
-        self.policy_backbone = FETEPolicy(cfg)
+        # Roll model (behavior policy)
+        self.roll_backbone = FETEPolicy(cfg)
+        self.roll_explore_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
+        self.roll_exploit_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
 
-        # Explore and exploit share the same backbone but different output heads
-        self.explore_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
-        self.exploit_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
+        # Pred model (successor policy)
+        self.pred_backbone = FETEPolicy(cfg)
+        self.pred_explore_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
+        self.pred_exploit_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
 
-        self.successor_backbone = FETEPolicy(cfg)
-
-        self.successor_explore_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
-        self.successor_exploit_head = nn.Linear(cfg.hidden_dim, cfg.act_dim)
+        self.update_behavior_policy()
 
     def update_behavior_policy(self):
-        # copy weights from successor to behavior
-        self._copy_params(self.successor_backbone, self.policy_backbone)
-        self._copy_params(self.successor_explore_head, self.explore_head)
-        self._copy_params(self.successor_exploit_head, self.exploit_head)
+        # copy weights from pred to roll
+        self._copy_params(self.pred_backbone, self.roll_backbone)
+        self._copy_params(self.pred_explore_head, self.roll_explore_head)
+        self._copy_params(self.pred_exploit_head, self.roll_exploit_head)
 
     def _copy_params(self, src_policy, dst_policy):
-        for param, successor_param in zip(
-            src_policy.parameters(),
-            dst_policy.parameters(),
-        ):
-            param.data.copy_(successor_param.data)
+        for src_param, dst_param in zip(src_policy.parameters(), dst_policy.parameters()):
+            dst_param.data.copy_(src_param.data)
 
     def forward(
         self,
@@ -158,22 +208,41 @@ class FETE(BaseModel):
         rewards: torch.Tensor,
         timesteps: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        policy_type: str = "explore_behavior",
+        episode_ids: Optional[torch.Tensor] = None,
+        policy_type: str = "explore_roll",
+        **kwargs,
     ):
-        if policy_type == "explore_behavior":
-            head = self.explore_head
-        elif policy_type == "explore_successor":
-            head = self.successor_explore_head
-        elif policy_type == "exploit_behavior":
-            head = self.exploit_head
-        elif policy_type == "exploit_successor":
-            head = self.successor_exploit_head
+        # Initialize backbone and head to None
+        backbone = None
+        head = None
 
-        if "behavior" in policy_type:
-            backbone = self.policy_backbone
-        elif "successor" in policy_type:
-            backbone = self.successor_backbone
+        # Determine which backbone and head to use based on policy_type
+        if policy_type == "explore_roll":
+            backbone = self.roll_backbone
+            head = self.roll_explore_head
+        elif policy_type == "explore_pred":
+            backbone = self.pred_backbone
+            head = self.pred_explore_head
+        elif policy_type == "exploit_roll":
+            backbone = self.roll_backbone
+            head = self.roll_exploit_head
+        elif policy_type == "exploit_pred":
+            backbone = self.pred_backbone
+            head = self.pred_exploit_head
+        else:
+            raise ValueError(f"Invalid policy_type: {policy_type}")
 
-        output = backbone(observations, actions, rewards, timesteps, attention_mask)
+        # Ensure backbone and head are defined
+        if backbone is None or head is None:
+            raise ValueError(f"Failed to initialize backbone or head for policy_type: {policy_type}")
+
+        output = backbone(
+            observations=observations,
+            actions=actions,
+            rewards=rewards,
+            timesteps=timesteps,
+            attention_mask=attention_mask,
+            episode_ids=episode_ids,
+        )
         output = head(output)
         return output
