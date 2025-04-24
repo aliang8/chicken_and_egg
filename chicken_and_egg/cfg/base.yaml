@@ -8,9 +8,9 @@ data:
 optimizer:
   name: 'AdamW'
   params:
-    lr: 3e-4
+    lr: 1e-4
     eps: 1e-5
-    weight_decay: 0.001
+    weight_decay: 1e-4
     betas: [0.9, 0.999]
   warmup_fraction: 0.1 # this is per epoch
 
@@ -27,7 +27,7 @@ lr_scheduler:
 
 # wandb configurations
 use_wandb: False
-clip_grad_norm: 10.0
+clip_grad_norm: 0.25
 
 # training
 eval_every: 100 # in terms of epochs

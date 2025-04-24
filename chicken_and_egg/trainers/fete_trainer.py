@@ -147,7 +147,7 @@ class FETETrainer(BaseTrainer):
                 # behavior and successor policies
                 logits_eval = behavior_logits[:, -1]
                 logits_softmax = F.softmax(logits_eval, dim=-1)
-                action_t = torch.argmax(logits_t, dim=-1)
+                action_t = torch.argmax(logits_softmax, dim=-1)
 
             # Add logits instead of multiplying (since they're in log space)
             # When we train, we compare against the sum of the two logits
@@ -499,7 +499,8 @@ class FETETrainer(BaseTrainer):
         )
         self.model.eval()
 
-        eval_metrics, policy_context = self.update(stage="eval")
+        with torch.no_grad():
+            eval_metrics, _, policy_context  = self.run_single_trial(stage="eval")
         self.log_to_wandb(eval_metrics, prefix="")
 
         # generate some visualizations of the return over time

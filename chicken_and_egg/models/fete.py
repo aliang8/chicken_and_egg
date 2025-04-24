@@ -85,7 +85,8 @@ class FETEPolicy(BaseModel):
 
         # Embedding layers
         self.embed_reward = nn.Linear(1, cfg.hidden_dim)
-        self.embed_action = nn.Linear(1, cfg.hidden_dim)
+        # self.embed_action = nn.Linear(1, cfg.hidden_dim)
+        self.embed_action = nn.Embedding(cfg.act_dim, cfg.hidden_dim)
         # self.embed_action = nn.Linear(cfg.act_dim, cfg.hidden_dim)
         self.embed_observation = nn.Linear(cfg.obs_dim, cfg.hidden_dim)
         self.embed_trial_id = nn.Embedding(cfg.num_episodes + 1, cfg.hidden_dim)
@@ -136,7 +137,7 @@ class FETEPolicy(BaseModel):
         # convert actions to one-hot
         # actions = F.one_hot(actions.long(), num_classes=self.cfg.act_dim).squeeze()
         # act_embeds = self.embed_action(actions.float())
-        act_embeds = self.embed_action(actions)
+        act_embeds = self.embed_action(actions.long()).squeeze()
 
         # Combine embeddings
         embeddings = rew_embeds + act_embeds + obs_embeds
