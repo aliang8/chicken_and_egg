@@ -153,9 +153,6 @@ class FETEPolicy(BaseModel):
         else:
             import ipdb; ipdb.set_trace()
 
-
-        import ipdb; ipdb.set_trace()
-
         embeddings = self.ln(embeddings)
 
         # # Pass through transformer
@@ -213,11 +210,8 @@ class FETE(BaseModel):
         self._copy_params(self.pred_exploit_head, self.roll_exploit_head)
 
     def _copy_params(self, src_policy, dst_policy):
-        for param, successor_param in zip(
-            src_policy.parameters(),
-            dst_policy.parameters(),
-        ):
-            param.data.copy_(successor_param.data)
+        for src_param, dst_param in zip(src_policy.parameters(), dst_policy.parameters()):
+            dst_param.data.copy_(src_param.data)
 
     def forward(
         self,

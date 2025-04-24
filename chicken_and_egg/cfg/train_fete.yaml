@@ -1,7 +1,7 @@
 name: fete 
 hp_name: ${name}-${env.hp_name}_s-${seed}
 
-update_behavior_every: 1000 # in terms of trials
+update_behavior_every: 100 # in terms of trials
 num_episodes: ${env.num_episodes}
 weighting: false
 
