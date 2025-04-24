@@ -111,11 +111,9 @@ class FETETrainer(BaseTrainer):
                 **policy_kwargs, policy_type=f"{policy_type}_pred"
             )
 
-            # Add logits instead of multiplying (since they're in log space)
-            logits = behavior_logits + successor_logits
-
             # compute loss for current timestep
-            logits_t = logits[:, -1]
+            # this is for taking a step in the environment
+            logits_t = behavior_logits[:, -1]
             
             # Apply temperature scaling
             if sample_actions:
@@ -147,16 +145,21 @@ class FETETrainer(BaseTrainer):
                 # this is eval, use the successor logits
                 # we use deterministic execution, but don't combine the logits between
                 # behavior and successor policies
-                logits_eval = successor_logits[:, -1]
+                logits_eval = behavior_logits[:, -1]
                 logits_softmax = F.softmax(logits_eval, dim=-1)
                 action_t = torch.argmax(logits_t, dim=-1)
+
+            # Add logits instead of multiplying (since they're in log space)
+            # When we train, we compare against the sum of the two logits
+            logits_train = behavior_logits + successor_logits
+            logits_train = logits_train[:, -1]
 
             # cross entropy loss
             if action_t.ndim == 0:
                 action_t = action_t.unsqueeze(0)
-                current_loss = F.cross_entropy(logits_t, action_t, reduction="mean")
+                current_loss = F.cross_entropy(logits_train, action_t, reduction="mean")
             else:
-                current_loss = F.cross_entropy(logits_t, action_t, reduction="mean")
+                current_loss = F.cross_entropy(logits_train, action_t, reduction="mean")
             action_loss += current_loss
 
             next_state, reward, done, terminal, info = env.step(to_numpy(action_t))

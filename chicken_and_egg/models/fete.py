@@ -188,20 +188,7 @@ class FETE(BaseModel):
         self.pred_explore_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
         self.pred_exploit_head = nn.Linear(cfg.hidden_dim, cfg.env.act_dim)
 
-        # Initialize cache
-        self.cache_len = (cfg.num_episodes + 1) * (cfg.env.timesteps_per_episode + 1)
-        self._init_cache()
-
-    def _init_cache(self):
-        """Initialize the cache for autoregressive sampling"""
-        self.cache = {
-            "observations": torch.zeros(1, self.cache_len, self.cfg.env.obs_dim),
-            "rewards": torch.zeros(1, self.cache_len, 1),
-            "actions": torch.zeros(1, self.cache_len, 1),
-            "timesteps": torch.zeros(1, self.cache_len, dtype=torch.long),
-            "episode_ids": torch.zeros(1, self.cache_len, dtype=torch.long),
-            "mask": torch.zeros(1, self.cache_len),
-        }
+        self.update_behavior_policy()
 
     def update_behavior_policy(self):
         # copy weights from pred to roll
