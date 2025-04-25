@@ -84,7 +84,8 @@ class FETETrainer(BaseTrainer):
         behavior_entropies = []
         successor_entropies = []
 
-        action_loss = 0.0  # Initialize as scalar for proper accumulation
+        # Accumulate per environment 
+        action_loss = torch.zeros(env.num_envs,).to(self.device)
         ep_ret = torch.zeros(env.num_envs, 1).to(self.device)
 
         for ts in range(self.cfg.env.timesteps_per_episode):
@@ -134,7 +135,6 @@ class FETETrainer(BaseTrainer):
             current_behavior_entropy = compute_entropy(behavior_logits[:, -1] / temperature)
             behavior_entropies.append(current_behavior_entropy)
 
-            
             # apply softmax to get a valid distribution
             logits_softmaxed = F.softmax(logits_t, dim=-1)
 
@@ -157,9 +157,10 @@ class FETETrainer(BaseTrainer):
             # cross entropy loss
             if action_t.ndim == 0:
                 action_t = action_t.unsqueeze(0)
-                current_loss = F.cross_entropy(logits_train, action_t, reduction="mean")
+                current_loss = F.cross_entropy(logits_train, action_t, reduction="none")
             else:
-                current_loss = F.cross_entropy(logits_train, action_t, reduction="mean")
+                current_loss = F.cross_entropy(logits_train, action_t, reduction="none")
+
             action_loss += current_loss
 
             next_state, reward, done, terminal, info = env.step(to_numpy(action_t))
@@ -221,9 +222,10 @@ class FETETrainer(BaseTrainer):
             "ep_ret": ep_ret.mean().item(),
         }
 
-        # Normalize by both timesteps and environments
         num_timesteps = min(self.cfg.env.timesteps_per_episode, ts + 1)
-        action_loss /= (num_timesteps * env.num_envs)
+        action_loss /= num_timesteps
+        # take mean over environments
+        action_loss = action_loss.mean()
         
         return ep_ret, action_loss, new_context, episode_metrics
 
@@ -286,7 +288,7 @@ class FETETrainer(BaseTrainer):
 
             # If we want N episodes, we need to rollout N-1 explore / exploit pairs.
             for trial_id in range(num_episodes):
-                if stage == "train" or stage == "eval" and trial_id < 1:
+                if stage == "train" or (stage == "eval" and trial_id < 1):
                     # run one trial of explore policy
                     # and add this to the context for the exploit policy
                     r_explore, l_explore, policy_context, episode_metrics = (
@@ -501,6 +503,7 @@ class FETETrainer(BaseTrainer):
 
         with torch.no_grad():
             eval_metrics, _, policy_context  = self.run_single_trial(stage="eval")
+
         self.log_to_wandb(eval_metrics, prefix="")
 
         # generate some visualizations of the return over time

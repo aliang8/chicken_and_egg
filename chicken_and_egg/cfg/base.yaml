@@ -36,8 +36,8 @@ exp_dir: ""
 mode: train
 skip_first_eval: False
 num_epochs: 10_000
-num_train_envs: 20
-num_eval_envs: 5
+num_train_envs: 2
+num_eval_envs: 2
 
 num_eval_rollouts_save: 2
 num_episodes: 1

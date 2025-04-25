@@ -7,9 +7,9 @@ num_episodes: 6
 hp_name: darkroom
 
 env_kwargs:
-  w: 9
-  h: 9
-  num_treasures: 8
+  w: 3
+  h: 3
+  num_treasures: 2
   rand_start: false
   hard_reward: false
 
